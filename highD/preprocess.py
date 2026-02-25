@@ -5,6 +5,7 @@ import h5py
 import argparse
 from pathlib import Path
 from tqdm import tqdm
+from multiprocessing import Pool, cpu_count
 
 # ==============================================================================
 # 1. 실험 설정 및 인덱스 정의
@@ -28,6 +29,12 @@ EXTRA_FEATURE_MAP = {
 # ==============================================================================
 # 2. 유틸리티 함수 (Flip, Feature Compute, Split)
 # ==============================================================================
+
+def process_wrapper(args_tuple):
+    rid, raw_path, args = args_tuple
+    samples = process_recording(rid, raw_path, args)
+    return rid, samples
+
 def get_neighbor_features(ego_hist, nb_window, args):
     """주변 차량의 9가지 후보 피처 계산"""
     rel_pos = nb_window[:, 1:3] - ego_hist[:, 1:3] # dx, dy
@@ -154,36 +161,67 @@ def main():
     parser.add_argument("--feature_mode", type=str, default="baseline", choices=EXTRA_FEATURE_MAP.keys())
     parser.add_argument("--normalize_flip", action="store_true", default=True)
     parser.add_argument("--seed", type=int, default=42)
-    # Gating params
     parser.add_argument("--t_front", type=float, default=3.0)
     parser.add_argument("--t_back", type=float, default=5.0)
     parser.add_argument("--vy_eps", type=float, default=0.27)
     parser.add_argument("--eps_gate", type=float, default=0.1)
-    
+
     args = parser.parse_args()
+
     raw_path = Path(args.raw_dir)
     rec_ids = sorted(set([f.name.split("_")[0] for f in raw_path.glob("*_tracks.csv")]))
-    
-    # 1. 전처리 및 샘플 수 카운트
-    all_rec_samples = {}
-    for rid in tqdm(rec_ids, desc="Preprocessing"):
-        samples = process_recording(rid, raw_path, args)
-        if samples: all_rec_samples[rid] = samples
 
-    # 2. 7:1:2 분할
+    print(f"Found {len(rec_ids)} recordings")
+    print(f"Using {cpu_count()} CPU cores")
+
+    # 🔹 multiprocessing 실행
+    with Pool(processes=cpu_count()) as pool:
+        results = list(
+            tqdm(
+                pool.imap(
+                    process_wrapper,
+                    [(rid, raw_path, args) for rid in rec_ids]
+                ),
+                total=len(rec_ids),
+                desc="Preprocessing"
+            )
+        )
+
+    # 🔹 결과 정리
+    all_rec_samples = {
+        rid: samples for rid, samples in results if samples
+    }
+
+    # 🔹 7:1:2 split
     rec_counts = {rid: len(s) for rid, s in all_rec_samples.items()}
     splits = balanced_recording_split(rec_counts, seed=args.seed)
 
-    # 3. HDF5 저장
+    # 🔹 HDF5 저장
     out_dir = Path(args.out_dir) / args.feature_mode
     out_dir.mkdir(parents=True, exist_ok=True)
-    
+
     for split_name, split_rec_ids in splits.items():
-        split_data = [s for rid in split_rec_ids for s in all_rec_samples[rid]]
+        split_data = [
+            s for rid in split_rec_ids for s in all_rec_samples[rid]
+        ]
+
         with h5py.File(out_dir / f"{split_name}.h5", 'w') as f:
-            f.create_dataset("input", data=np.array([s["input"] for s in split_data]), compression="gzip")
-            f.create_dataset("adj", data=np.array([s["adj"] for s in split_data]), compression="gzip")
-            f.create_dataset("target", data=np.array([s["target"] for s in split_data]), compression="gzip")
+            f.create_dataset(
+                "input",
+                data=np.array([s["input"] for s in split_data]),
+                compression="gzip"
+            )
+            f.create_dataset(
+                "adj",
+                data=np.array([s["adj"] for s in split_data]),
+                compression="gzip"
+            )
+            f.create_dataset(
+                "target",
+                data=np.array([s["target"] for s in split_data]),
+                compression="gzip"
+            )
+
         print(f"-> {split_name}.h5 saved ({len(split_data)} samples)")
 
 if __name__ == "__main__":

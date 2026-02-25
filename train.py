@@ -1,0 +1,201 @@
+import argparse
+import os
+import yaml
+import numpy as np
+import torch
+import torch.optim as optim
+import torch.nn as nn
+from pathlib import Path
+from tqdm import tqdm
+from datetime import datetime
+from torch.utils.tensorboard import SummaryWriter
+import random
+
+from model import Model
+from feeder import HighDFeeder as Feeder
+
+# preprocess.py와 동일한 피처 인덱스 맵 정의 
+EXTRA_FEATURE_MAP = {
+    'baseline': [0, 1],
+    'exp1': [0, 1, 8],
+    'exp2': [0, 1, 6, 7],
+    'exp3': [6, 7],
+    'exp4': [4, 5, 6, 7, 8],
+    'exp5': [0, 1, 2, 3, 4, 5, 8],
+    'exp6': [0, 1, 2, 3, 4, 5, 6, 7, 8],
+}
+
+def seed_everything(seed):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+
+def load_config(config_path):
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
+def get_dataloader(cfg, split='train'):
+    """feature_mode에 맞는 HDF5 데이터를 로드 """
+    data_path = Path(cfg['data']['base_dir']) / cfg['exp']['feature_mode'] / f"{split}.h5"
+    
+    dataset = Feeder(data_path=str(data_path), train_val_test=split)
+    
+    batch_size = cfg['data']['batch_size'] 
+    shuffle = True if split == 'train' else False
+    
+    print(f"📂 {split.capitalize()} Data Loading from {cfg['data']['base_dir']}/{cfg['exp']['feature_mode']}/{split}.h5...")
+
+    return torch.utils.data.DataLoader(
+        dataset=dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=cfg['data']['num_workers'],
+        pin_memory=True,
+        prefetch_factor=4,
+        persistent_workers=True
+    )
+
+def count_parameters(model):
+    total = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    mem = total * 4 / (1024**2) # MB
+    print("=" * 50)
+    print("📊 Model Size Info")
+    print(f"  • Total Parameters : {total:,}")
+    print(f"  • Model Memory Size: {mem:.2f} MB")
+    print("=" * 50)
+    print()
+
+def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs):
+    model.train()
+    total_loss = 0
+    pbar = tqdm(loader, desc=f"Ep {epoch:3d}/{total_epochs}", dynamic_ncols=True)
+    
+    for data, adj, target in pbar:
+        data, adj, target = data.to(device, non_blocking=True), adj.to(device, non_blocking=True), target.to(device, non_blocking=True)
+
+        if data.shape[1] != model.in_channels:
+            data = data.permute(0, 3, 2, 1)
+        
+        output = model(data, adj, target.shape[1]) 
+        
+        ego_pred = output[:, :, :, 0].permute(0, 2, 1)
+        loss = criterion(ego_pred, target)
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item()
+        pbar.set_postfix(L=f"{loss.item():.4f}")
+        
+    return total_loss / len(loader)
+
+def validate(model, loader, criterion, device, epoch, total_epochs):
+    model.eval()
+    total_loss = 0
+    
+    # mmTransformer 스타일의 검증 진행률 바
+    pbar = tqdm(loader, desc=f"Epoch {epoch:3d}/{total_epochs} [Val]", dynamic_ncols=True)
+    
+    with torch.no_grad(): # 검증 시에는 그래디언트 계산 제외
+        for data, adj, target in pbar:
+            # 1. 데이터 타입 변환 (Double -> Float) 및 장치 이동
+            data = data.to(device).float()
+            adj = adj.to(device).float()
+            target = target.to(device).float()
+
+            # 2. 입력 차원 확인 및 변경 (N, V, T, C) -> (N, C, T, V)
+            if data.shape[1] != model.in_channels:
+                data = data.permute(0, 3, 2, 1)
+            
+            # 3. 모델 예측 (미래 프레임 수 전달)
+            output = model(data, adj, target.shape[1])
+            
+            # 4. Ego 차량(0번 노드) 예측값만 추출하여 Loss 계산
+            # output: (N, 2, 25, 9) -> ego_pred: (N, 25, 2)
+            ego_pred = output[:, :, :, 0].permute(0, 2, 1)
+            loss = criterion(ego_pred, target)
+            
+            total_loss += loss.item()
+            
+            pbar.set_postfix(L=f"{loss.item():.4f}")
+            
+    avg_val_loss = total_loss / len(loader)
+    return avg_val_loss
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default='config.yaml')
+    args = parser.parse_args()
+    
+    cfg = load_config(args.config)
+    seed_everything(cfg['exp']['seed'])
+    device = torch.device(cfg['exp']['device'] if torch.cuda.is_available() else 'cpu')
+    torch.backends.cudnn.benchmark = True
+    
+    # 1. Feature Mode에 따른 자동 입력 채널 설정 
+    feature_mode = cfg['exp']['feature_mode']
+    in_channels = len(EXTRA_FEATURE_MAP[feature_mode])
+    print("=" * 50)
+    print(f"      Experiment: {feature_mode} (In-Channels: {in_channels})      ")
+    
+    # 2. 모델 초기화
+    model = Model(in_channels=in_channels, 
+                  graph_args={'max_hop': cfg['model']['max_hop'], 'num_node': cfg['model']['num_node']}, 
+                  edge_importance_weighting=cfg['model']['edge_importance_weighting'])
+    model.to(device)
+    count_parameters(model)
+
+    log_dir = Path("logs") / cfg['exp']['feature_mode'] / datetime.now().strftime("%m%d-%H%M")
+    writer = SummaryWriter(log_dir=str(log_dir))
+    
+    print(f"📊 TensorBoard 로그가 {log_dir}에 기록됩니다.")
+    
+    # 3. 데이터 로더
+    train_loader = get_dataloader(cfg, 'train')
+    val_loader = get_dataloader(cfg, 'val')
+    print(f"✅ [Data] Ready! Train: {len(train_loader.dataset)} / Val: {len(val_loader.dataset)}\n")
+    
+    optimizer = optim.Adam(model.parameters(), lr=cfg['train']['lr'], weight_decay=cfg['train']['weight_decay'])
+    criterion = nn.SmoothL1Loss() # GRIP++ 기본 Loss 
+    
+    # 4. 저장 경로 (ckpts/{feature_mode}/best.pt)
+    ckpt_dir = Path(cfg['train']['ckpt_dir']) / feature_mode
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    best_path = ckpt_dir / "best.pt"
+    
+    best_val_loss = float('inf')
+    
+    # 5. 학습 루프
+    epochs = cfg['train']['epochs']
+    for epoch in range(1, epochs + 1):
+        train_l = train_epoch(model, train_loader, optimizer, criterion, device, epoch, epochs)
+        val_l = validate(model, val_loader, criterion, device, epoch, epochs)
+        
+        print(f"Epoch {epoch:3d} | Train Loss: {train_l:.4f} | Val Loss: {val_l:.4f} |")
+
+        writer.add_scalar('Loss/train', train_l, epoch)
+        writer.add_scalar('Loss/val', val_l, epoch)
+        writer.add_scalar('Learning_Rate', optimizer.param_groups[0]['lr'], epoch)
+        
+        # Best 모델 저장 로직
+        if val_l < best_val_loss:
+            best_val_loss = val_l
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': val_l,
+                'feature_mode': feature_mode
+            }, best_path)
+            print(f"⭐ Best model updated and saved to {best_path}")
+        print("-" * 50)
+        print()
+    
+    writer.close()
+
+if __name__ == '__main__':
+    main()

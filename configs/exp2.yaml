@@ -2,7 +2,7 @@
 # EXPERIMENT SETTING
 # =========================
 exp:
-  feature_mode: 'baseline'  # choices: [baseline, exp1, exp2, exp3, exp4, exp5, exp6]
+  feature_mode: 'exp2'  # choices: [baseline, exp1, exp2, exp3, exp4, exp5, exp6]
   device: 'cuda:0'
   seed: 42
 
@@ -29,7 +29,7 @@ model:
 # TRAINING PARAMS
 # =========================
 train:
-  epochs: 500
-  lr: 0.001
+  epochs: 300
+  lr: 0.0005
   weight_decay: 0.0001
   ckpt_dir: 'ckpts'

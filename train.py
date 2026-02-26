@@ -47,7 +47,9 @@ def get_dataloader(cfg, split='train'):
     batch_size = cfg['data']['batch_size'] 
     shuffle = True if split == 'train' else False
     
-    print(f"📂 {split.capitalize()} Data Loading from {cfg['data']['base_dir']}/{cfg['exp']['feature_mode']}/{split}.h5...")
+    persistent_workers = cfg['data'].get('persistent_workers', True)
+
+    print(f"📂 {split.capitalize()} Data Loading from {data_path}...")
 
     return torch.utils.data.DataLoader(
         dataset=dataset,
@@ -56,7 +58,7 @@ def get_dataloader(cfg, split='train'):
         num_workers=cfg['data']['num_workers'],
         pin_memory=True,
         prefetch_factor=4,
-        persistent_workers=True
+        persistent_workers=persistent_workers
     )
 
 def count_parameters(model):

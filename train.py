@@ -194,6 +194,7 @@ def main():
     # 5. 학습 루프
     epochs = cfg['train']['epochs']
     for epoch in range(start_epoch, epochs + 1):
+        print(f"{'=' * 30}  Epoch {epoch}/{epochs}  {'=' * 30}")
         train_l = train_epoch(model, train_loader, optimizer, criterion, device, epoch, epochs)
         val_l = validate(model, val_loader, criterion, device, epoch, epochs)
         

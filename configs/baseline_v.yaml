@@ -2,7 +2,7 @@
 # EXPERIMENT SETTING
 # =========================
 exp:
-  feature_mode: 'baseline'  # choices: [baseline, exp1, exp2, exp3, exp4, exp5, exp6]
+  feature_mode: 'baseline_v'  # choices: [baseline, exp1, exp2, exp3, exp4, exp5, exp6]
   device: 'cuda:0'
   seed: 42
 

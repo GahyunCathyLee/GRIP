@@ -30,6 +30,6 @@ model:
 # =========================
 train:
   epochs: 500
-  lr: 0.001
+  lr: 0.0001
   weight_decay: 0.0001
   ckpt_dir: 'ckpts'

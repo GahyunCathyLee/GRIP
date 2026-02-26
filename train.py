@@ -1,6 +1,7 @@
 import argparse
 import os
 import yaml
+import model
 import numpy as np
 import torch
 import torch.optim as optim
@@ -71,7 +72,7 @@ def count_parameters(model):
 def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs):
     model.train()
     total_loss = 0
-    pbar = tqdm(loader, desc=f"Ep {epoch:3d}/{total_epochs}", dynamic_ncols=True)
+    pbar = tqdm(loader, desc=f"Train", dynamic_ncols=True)
     
     for data, adj, target in pbar:
         data, adj, target = data.to(device, non_blocking=True), adj.to(device, non_blocking=True), target.to(device, non_blocking=True)
@@ -97,12 +98,10 @@ def validate(model, loader, criterion, device, epoch, total_epochs):
     model.eval()
     total_loss = 0
     
-    # mmTransformer 스타일의 검증 진행률 바
-    pbar = tqdm(loader, desc=f"Epoch {epoch:3d}/{total_epochs} [Val]", dynamic_ncols=True)
+    pbar = tqdm(loader, desc=f"Valid", dynamic_ncols=True)
     
-    with torch.no_grad(): # 검증 시에는 그래디언트 계산 제외
+    with torch.no_grad():
         for data, adj, target in pbar:
-            # 1. 데이터 타입 변환 (Double -> Float) 및 장치 이동
             data = data.to(device).float()
             adj = adj.to(device).float()
             target = target.to(device).float()
@@ -129,6 +128,7 @@ def validate(model, loader, criterion, device, epoch, total_epochs):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='config.yaml')
+    parser.add_argument('--resume', action='store_true', help='auto resume from best.pt in ckpt_dir')
     args = parser.parse_args()
     
     cfg = load_config(args.config)
@@ -136,42 +136,61 @@ def main():
     device = torch.device(cfg['exp']['device'] if torch.cuda.is_available() else 'cpu')
     torch.backends.cudnn.benchmark = True
     
-    # 1. Feature Mode에 따른 자동 입력 채널 설정 
+    # 1. 환경 및 경로 설정 (Resume을 위해 상단으로 이동)
     feature_mode = cfg['exp']['feature_mode']
     in_channels = len(EXTRA_FEATURE_MAP[feature_mode])
-    print("=" * 50)
-    print(f"      Experiment: {feature_mode} (In-Channels: {in_channels})      ")
     
-    # 2. 모델 초기화
+    ckpt_dir = Path(cfg['train']['ckpt_dir']) / feature_mode
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    best_path = ckpt_dir / "best.pt"  
+
+    print("=" * 50)
+    exp = f"      Experiment: {feature_mode} (In-Channels: {in_channels})      "
+    print(f"{(50-len(exp))/2*' '}{exp}{(50-len(exp))/2*' '}")
+    
+    # 2. 모델 및 학습 도구 초기화
     model = Model(in_channels=in_channels, 
                   graph_args={'max_hop': cfg['model']['max_hop'], 'num_node': cfg['model']['num_node']}, 
                   edge_importance_weighting=cfg['model']['edge_importance_weighting'])
     model.to(device)
+
+    optimizer = optim.Adam(model.parameters(), lr=cfg['train']['lr'], weight_decay=cfg['train']['weight_decay'])
+    criterion = nn.SmoothL1Loss()
+    
+    start_epoch = 1
+    best_val_loss = float('inf')
+
+    # 3. 자동 Resume 로직
+    if args.resume:
+        if best_path.exists():
+            print(f"🔄 [Resume] Found existing checkpoint: {best_path}")
+            checkpoint = torch.load(best_path, map_location=device)
+            
+            # 가중치 및 옵티마이저 상태 복구
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            start_epoch = checkpoint['epoch'] + 1
+            best_val_loss = checkpoint.get('val_loss', float('inf'))
+            
+            print(f"✅ Successfully resumed from Epoch {checkpoint['epoch']} (Best Val Loss: {best_val_loss:.4f})")
+        else:
+            print(f"⚠️ [Resume] 'best.pt' not found at {best_path}. Starting from scratch.")
+
     count_parameters(model)
 
-    log_dir = Path("logs") / cfg['exp']['feature_mode'] / datetime.now().strftime("%m%d-%H%M")
+    # 4. 로그 및 데이터 로더 설정
+    log_dir = Path("logs") / feature_mode / datetime.now().strftime("%m%d-%H%M")
     writer = SummaryWriter(log_dir=str(log_dir))
-    
     print(f"📊 TensorBoard 로그가 {log_dir}에 기록됩니다.")
     
-    # 3. 데이터 로더
     train_loader = get_dataloader(cfg, 'train')
     val_loader = get_dataloader(cfg, 'val')
     print(f"✅ [Data] Ready! Train: {len(train_loader.dataset)} / Val: {len(val_loader.dataset)}\n")
     
-    optimizer = optim.Adam(model.parameters(), lr=cfg['train']['lr'], weight_decay=cfg['train']['weight_decay'])
-    criterion = nn.SmoothL1Loss() # GRIP++ 기본 Loss 
-    
-    # 4. 저장 경로 (ckpts/{feature_mode}/best.pt)
-    ckpt_dir = Path(cfg['train']['ckpt_dir']) / feature_mode
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    best_path = ckpt_dir / "best.pt"
-    
-    best_val_loss = float('inf')
-    
     # 5. 학습 루프
     epochs = cfg['train']['epochs']
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         train_l = train_epoch(model, train_loader, optimizer, criterion, device, epoch, epochs)
         val_l = validate(model, val_loader, criterion, device, epoch, epochs)
         
@@ -196,6 +215,3 @@ def main():
         print()
     
     writer.close()
-
-if __name__ == '__main__':
-    main()

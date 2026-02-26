@@ -1,0 +1,158 @@
+import argparse
+import os
+import yaml
+import time
+import numpy as np
+import torch
+import torch.nn as nn
+from tqdm import tqdm
+from pathlib import Path
+
+from model import Model
+from feeder import HighDFeeder as Feeder
+
+def get_args():
+    parser = argparse.ArgumentParser(description='GRIP++ Evaluation')
+    parser.add_argument('--config', type=str, default='configs/baseline.yaml', help='path to config file')
+    parser.add_argument('--ckpt', type=str, required=True, help='path to model checkpoint (.pt)')
+    parser.add_argument('--measure_time', action='store_true', help='measure inference time with batch size 1')
+    return parser.parse_args()
+
+def calculate_metrics(pred, target):
+    """
+    pred: (N, T, 2)
+    target: (N, T, 2)
+    """
+    # 유클리드 거리 계산: (N, T)
+    diff = pred - target
+    dist = torch.norm(diff, p=2, dim=-1) 
+
+    # 1. ADE (Average Displacement Error)
+    ade = torch.mean(dist).item()
+
+    # 2. FDE (Final Displacement Error)
+    fde = torch.mean(dist[:, -1]).item()
+
+    # 3. RMSE (Root Mean Square Error)
+    # RMSE = sqrt(mean(dist^2))
+    rmse = torch.sqrt(torch.mean(dist**2)).item()
+
+    # 4. RMSE @ 1s ~ 5s (Data freq가 5Hz인 경우: 5, 10, 15, 20, 25 frames)
+    # 사용자의 데이터 주기에 맞춰 인덱스를 조절하세요.
+    rmse_steps = {}
+    fps = 5 # 5Hz 가정
+    for s in range(1, 6):
+        idx = s * fps - 1
+        if idx < pred.shape[1]:
+            step_rmse = torch.sqrt(torch.mean(dist[:, idx]**2)).item()
+            rmse_steps[f'RMSE@{s}s'] = step_rmse
+
+    return ade, fde, rmse, rmse_steps
+
+def evaluate(model, loader, device):
+    model.eval()
+    all_ade, all_fde, all_rmse = [], [], []
+    all_step_rmse = {f'RMSE@{s}s': [] for s in range(1, 6)}
+
+    print(f"🔍 평가 시작 (Samples: {len(loader.dataset)})")
+    
+    with torch.no_grad():
+        for data, adj, target in tqdm(loader, desc="Eval"):
+            data, adj, target = data.to(device).float(), adj.to(device).float(), target.to(device).float()
+            
+            if data.shape[1] != model.in_channels:
+                data = data.permute(0, 3, 2, 1)
+
+            # Inference
+            output = model(data, adj, target.shape[1])
+            # Ego 차량(0번 노드)만 추출: (N, C, T, V) -> (N, T, C)
+            ego_pred = output[:, :, :, 0].permute(0, 2, 1)
+
+            # Metrics
+            ade, fde, rmse, step_rmse = calculate_metrics(ego_pred, target)
+            
+            all_ade.append(ade)
+            all_fde.append(fde)
+            all_rmse.append(rmse)
+            for k, v in step_rmse.items():
+                all_step_rmse[k].append(v)
+
+    # 최종 결과 출력
+    print("\n" + "="*50)
+    print(f"📊 Final Results (m)")
+    print(f"  • ADE  : {np.mean(all_ade):.4f}")
+    print(f"  • FDE  : {np.mean(all_fde):.4f}")
+    print(f"  • RMSE : {np.mean(all_rmse):.4f}")
+    print("-" * 50)
+    for k, v in all_step_rmse.items():
+        print(f"  • {k:8s} : {np.mean(v):.4f}")
+    print("="*50 + "\n")
+
+def measure_inference_time(model, loader, device, iterations=10000):
+    model.eval()
+    print(f"⏱️ Inference Time 측정 시작 (Batch Size: 1, Iterations: {iterations})")
+    
+    # 단일 샘플 준비
+    data, adj, target = next(iter(loader))
+    data, adj = data[0:1].to(device).float(), adj[0:1].to(device).float()
+    if data.shape[1] != model.in_channels:
+        data = data.permute(0, 3, 2, 1)
+    
+    pred_len = target.shape[1]
+
+    # Warm-up (GPU 예열)
+    for _ in range(100):
+        _ = model(data, adj, pred_len)
+
+    torch.cuda.synchronize()
+    start_time = time.time()
+    
+    with torch.no_grad():
+        for _ in range(iterations):
+            _ = model(data, adj, pred_len)
+            
+    torch.cuda.synchronize()
+    end_time = time.time()
+
+    avg_time = (end_time - start_time) / iterations
+    print(f"✅ 측정 완료")
+    print(f"  • Total Time   : {end_time - start_time:.4f} s")
+    print(f"  • Avg Latency  : {avg_time * 1000:.4f} ms")
+    print(f"  • FPS (Infr)   : {1/avg_time:.2f} frames/s")
+    print("="*50)
+
+def main():
+    args = get_args()
+    with open(args.config, 'r') as f:
+        cfg = yaml.safe_load(f)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # 1. 모델 로드
+    model = Model(in_channels=cfg['model']['in_channels'], 
+                  graph_args={'max_hop': cfg['model']['max_hop'], 'num_node': cfg['model']['num_node']}, 
+                  edge_importance_weighting=cfg['model']['edge_importance_weighting']).to(device)
+
+    # 가중치 불러오기
+    checkpoint = torch.load(args.ckpt, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    print(f"✅ Checkpoint Loaded: {args.ckpt}")
+
+    # 2. 데이터 로더 준비 (Test/Val 데이터)
+    test_path = Path(cfg['data']['base_dir']) / cfg['exp']['feature_mode'] / "test.h5"
+    if not test_path.exists():
+        test_path = Path(cfg['data']['base_dir']) / cfg['exp']['feature_mode'] / "val.h5"
+    
+    test_loader = torch.utils.data.DataLoader(
+        Feeder(str(test_path)),
+        batch_size=cfg['data']['batch_size_val'], shuffle=False, num_workers=4
+    )
+
+    # 3. 모드별 실행
+    if args.measure_time:
+        measure_inference_time(model, test_loader, device)
+    else:
+        evaluate(model, test_loader, device)
+
+if __name__ == '__main__':
+    main()

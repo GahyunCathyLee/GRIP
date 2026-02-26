@@ -146,7 +146,8 @@ def main():
 
     print("=" * 50)
     exp = f"      Experiment: {feature_mode} (In-Channels: {in_channels})      "
-    print(f"{(50-len(exp))/2*' '}{exp}{(50-len(exp))/2*' '}")
+    margin = (50 - len(exp)) // 2
+    print(f"{' ' * margin}{exp}{' ' * margin}")
     
     # 2. 모델 및 학습 도구 초기화
     model = Model(in_channels=in_channels, 
@@ -215,3 +216,6 @@ def main():
         print()
     
     writer.close()
+
+if __name__ == '__main__':
+    main()

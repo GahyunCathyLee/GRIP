@@ -11,6 +11,17 @@ from pathlib import Path
 from model import Model
 from feeder import HighDFeeder as Feeder
 
+EXTRA_FEATURE_MAP = {
+    'baseline': [0, 1],
+    'baseline_v': [2, 3],
+    'exp1': [0, 1, 8],
+    'exp2': [0, 1, 6, 7],
+    'exp3': [6, 7],
+    'exp4': [4, 5, 6, 7, 8],
+    'exp5': [0, 1, 2, 3, 4, 5, 8],
+    'exp6': [0, 1, 2, 3, 4, 5, 6, 7, 8],
+}
+
 def get_args():
     parser = argparse.ArgumentParser(description='GRIP++ Evaluation')
     parser.add_argument('--config', type=str, default='configs/baseline.yaml', help='path to config file')
@@ -128,8 +139,12 @@ def main():
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # 1. 모델 로드
-    model = Model(in_channels=cfg['model']['in_channels'], 
+    # 1. Feature Mode에 따른 자동 입력 채널 설정
+    feature_mode = cfg['exp']['feature_mode']
+    in_channels = len(EXTRA_FEATURE_MAP[feature_mode])
+    
+    # 2. 모델 로드
+    model = Model(in_channels=in_channels, 
                   graph_args={'max_hop': cfg['model']['max_hop'], 'num_node': cfg['model']['num_node']}, 
                   edge_importance_weighting=cfg['model']['edge_importance_weighting']).to(device)
 
@@ -143,9 +158,11 @@ def main():
     if not test_path.exists():
         test_path = Path(cfg['data']['base_dir']) / cfg['exp']['feature_mode'] / "val.h5"
     
+    batch_size = cfg['data'].get('batch_size_val', cfg['data'].get('batch_size', 64))
+    
     test_loader = torch.utils.data.DataLoader(
         Feeder(str(test_path)),
-        batch_size=cfg['data']['batch_size_val'], shuffle=False, num_workers=4
+        batch_size=batch_size, shuffle=False, num_workers=4
     )
 
     # 3. 모드별 실행

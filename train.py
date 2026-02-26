@@ -18,6 +18,7 @@ from feeder import HighDFeeder as Feeder
 # preprocess.py와 동일한 피처 인덱스 맵 정의 
 EXTRA_FEATURE_MAP = {
     'baseline': [0, 1],
+    'baseline_v': [2, 3],
     'exp1': [0, 1, 8],
     'exp2': [0, 1, 6, 7],
     'exp3': [6, 7],

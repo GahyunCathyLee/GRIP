@@ -103,34 +103,50 @@ def measure_inference_time(model, loader, device, iterations=10000):
     model.eval()
     print(f"⏱️ Inference Time 측정 시작 (Batch Size: 1, Iterations: {iterations})")
     
-    # 단일 샘플 준비
+    # 1. 단일 샘플 준비
     data, adj, target = next(iter(loader))
     data, adj = data[0:1].to(device).float(), adj[0:1].to(device).float()
     if data.shape[1] != model.in_channels:
         data = data.permute(0, 3, 2, 1)
     
     pred_len = target.shape[1]
+    times = []
 
-    # Warm-up (GPU 예열)
+    # 2. Warm-up (GPU 예열) - 드라이버 및 cuDNN 초기화 시간 제외
     for _ in range(100):
-        _ = model(data, adj, pred_len)
-
+        with torch.no_grad():
+            _ = model(data, adj, pred_len)
     torch.cuda.synchronize()
-    start_time = time.time()
-    
+
+    # 3. 실제 측정 루프
+    print(f"🚀 Measuring...")
     with torch.no_grad():
         for _ in range(iterations):
+            start_time = time.time()
+            
             _ = model(data, adj, pred_len)
             
-    torch.cuda.synchronize()
-    end_time = time.time()
+            torch.cuda.synchronize()  # GPU 연산이 완료될 때까지 대기
+            end_time = time.time()
+            
+            times.append((end_time - start_time) * 1000)  # ms 단위로 저장
 
-    avg_time = (end_time - start_time) / iterations
-    print(f"✅ 측정 완료")
-    print(f"  • Total Time   : {end_time - start_time:.4f} s")
-    print(f"  • Avg Latency  : {avg_time * 1000:.4f} ms")
-    print(f"  • FPS (Infr)   : {1/avg_time:.2f} frames/s")
-    print("="*50)
+    # 4. 통계 계산 (numpy 활용)
+    avg_time = np.mean(times)
+    std_time = np.std(times)
+    min_time = np.min(times)
+    max_time = np.max(times)
+
+    # 5. 결과 출력
+    print("\n" + "="*50)
+    print(f"📊 Inference Time Statistics (ms)")
+    print(f"  • Avg Latency : {avg_time:.4f} ms")
+    print(f"  • Std Dev     : {std_time:.4f} ms")
+    print(f"  • Min Latency : {min_time:.4f} ms")
+    print(f"  • Max Latency : {max_time:.4f} ms")
+    print("-" * 50)
+    print(f"  • FPS (Avg)   : {1000/avg_time:.2f} frames/s")
+    print("="*50 + "\n")
 
 def main():
     args = get_args()

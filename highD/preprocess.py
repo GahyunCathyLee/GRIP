@@ -18,6 +18,7 @@ MAX_NEIGHBORS = 8 # highD 슬롯 기반 8대
 # [0:dx, 1:dy, 2:dvx, 3:dvy, 4:dax, 5:day, 6:lc_state, 7:dx_time, 8:gate]
 EXTRA_FEATURE_MAP = {
     'baseline': [0, 1],
+    'baseline_v': [2, 3],
     'exp1': [0, 1, 8],
     'exp2': [0, 1, 6, 7],
     'exp3': [6, 7],

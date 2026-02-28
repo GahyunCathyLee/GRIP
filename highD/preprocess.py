@@ -150,7 +150,7 @@ def process_recording(rec_id, raw_dir, args):
                 
                 # 피처 계산 및 선택된 인덱스 추출
                 all_nb_feats = get_neighbor_features(ego_hist, nb_win, args)
-                tensor[nb_idx + 1, :, selected_indices] = all_nb_feats[:, selected_indices]
+                tensor[nb_idx + 1, :, :][:, selected_indices] = all_nb_feats[:, selected_indices]
                 adj[0, nb_idx + 1] = adj[nb_idx + 1, 0] = 1 # 상호작용 연결
             
             samples.append({"input": tensor, "adj": adj, "target": window[T_H:, 1:3] - norm_center})

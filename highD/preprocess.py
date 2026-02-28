@@ -18,7 +18,6 @@ MAX_NEIGHBORS = 8 # highD 슬롯 기반 8대
 # [0:dx, 1:dy, 2:dvx, 3:dvy, 4:dax, 5:day, 6:lc_state, 7:dx_time, 8:gate]
 EXTRA_FEATURE_MAP = {
     'baseline': [0, 1],
-    'baseline_v': [2, 3],
     'exp1': [0, 1, 8],
     'exp2': [0, 1, 6, 7],
     'exp3': [6, 7],
@@ -47,12 +46,17 @@ def get_neighbor_features(ego_hist, nb_window, args):
 
     # lc_state (차선 변경 상태)
     lc_state = np.zeros_like(dy)
-    nb_vy_abs = nb_window[:, 4]
-    mask_l, mask_r = dy < -1.0, dy > 1.0
-    lc_state[mask_l & (nb_vy_abs > args.vy_eps)] = -1.0
-    lc_state[mask_l & (nb_vy_abs < -args.vy_eps)] = -3.0
-    lc_state[mask_r & (nb_vy_abs < -args.vy_eps)] = 1.0
-    lc_state[mask_r & (nb_vy_abs > args.vy_eps)] = 3.0
+    nb_vy = nb_window[:, 4]  # neighbor의 절대 vy (+: 오른쪽, -: 왼쪽)
+    mask_l = dy < -1.0  # 이웃이 Ego의 왼쪽 차선
+    mask_r = dy > 1.0   # 이웃이 Ego의 오른쪽 차선
+
+    lc_state[mask_l & (nb_vy > args.vy_eps)]             = -1.0  # 왼쪽에서 Ego쪽으로 cut-in
+    lc_state[mask_l & (nb_vy < -args.vy_eps)]            = -3.0  # 왼쪽으로 더 멀어짐
+    lc_state[mask_l & (np.abs(nb_vy) <= args.vy_eps)]    = -2.0  # 왼쪽 차선 유지 ← 추가
+
+    lc_state[mask_r & (nb_vy < -args.vy_eps)]            = 1.0   # 오른쪽에서 Ego쪽으로 cut-in
+    lc_state[mask_r & (nb_vy > args.vy_eps)]             = 3.0   # 오른쪽으로 더 멀어짐
+    lc_state[mask_r & (np.abs(nb_vy) <= args.vy_eps)]    = 2.0   # 오른쪽 차선 유지 ← 추가
 
     # dx_time & gate (게이팅 로직)
     denom = dvx.copy()
@@ -113,7 +117,7 @@ def process_recording(rec_id, raw_dir, args):
     df = df[df["frame"] % stride == 0].sort_values(["id", "frame"])
 
     selected_indices = EXTRA_FEATURE_MAP[args.feature_mode]
-    num_c = len(selected_indices)
+    num_c = 9
     
     samples = []
     agents = {vid: g[["frame", "x", "y", "xVelocity", "yVelocity", "xAcceleration", "yAcceleration"]].values 
@@ -135,11 +139,8 @@ def process_recording(rec_id, raw_dir, args):
             adj = np.eye(1 + MAX_NEIGHBORS, dtype=np.float32)
             
             # Ego 피처
-            ego_xy = ego_hist[:, 1:3] 
-            if num_c >= 2: tensor[0, :, :2] = ego_xy
-            
-            #ego_vx_vy = ego_hist[:, 3:5]
-            #if num_c >= 2: tensor[0, :, :2] = ego_vx_vy
+            norm_center = ego_hist[-1, 1:3]
+            tensor[0, :, 2:4] = ego_hist[:, 3:5]
             
             for nb_idx, nb_id in enumerate(nbr_ids):
                 if nb_id <= 0 or nb_id not in agents: continue
@@ -149,10 +150,10 @@ def process_recording(rec_id, raw_dir, args):
                 
                 # 피처 계산 및 선택된 인덱스 추출
                 all_nb_feats = get_neighbor_features(ego_hist, nb_win, args)
-                tensor[nb_idx + 1, :, :] = all_nb_feats[:, selected_indices]
+                tensor[nb_idx + 1, :, selected_indices] = all_nb_feats[:, selected_indices]
                 adj[0, nb_idx + 1] = adj[nb_idx + 1, 0] = 1 # 상호작용 연결
             
-            samples.append({"input": tensor, "adj": adj, "target": window[T_H:, 1:3]})
+            samples.append({"input": tensor, "adj": adj, "target": window[T_H:, 1:3] - norm_center})
     return samples
 
 def main():

@@ -18,7 +18,6 @@ from feeder import HighDFeeder as Feeder
 # preprocess.py와 동일한 피처 인덱스 맵 정의 
 EXTRA_FEATURE_MAP = {
     'baseline': [0, 1],
-    'baseline_v': [2, 3],
     'exp1': [0, 1, 8],
     'exp2': [0, 1, 6, 7],
     'exp3': [6, 7],
@@ -141,14 +140,15 @@ def main():
     
     # 1. 환경 및 경로 설정 (Resume을 위해 상단으로 이동)
     feature_mode = cfg['exp']['feature_mode']
-    in_channels = len(EXTRA_FEATURE_MAP[feature_mode])
+    in_channels = 9
     
     ckpt_dir = Path(cfg['train']['ckpt_dir']) / feature_mode
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_path = ckpt_dir / "best.pt"  
 
+    active = EXTRA_FEATURE_MAP[feature_mode]
     print("=" * 50)
-    exp = f"      Experiment: {feature_mode} (In-Channels: {in_channels})      "
+    exp = f"      Experiment: {feature_mode} (Active slots: {active})      "
     margin = (50 - len(exp)) // 2
     print(f"{' ' * margin}{exp}{' ' * margin}")
     

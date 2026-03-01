@@ -2,6 +2,7 @@ import argparse
 import os
 import yaml
 import time
+from highD.preprocess import get_num_channels
 import numpy as np
 import torch
 import torch.nn as nn
@@ -21,6 +22,9 @@ EXTRA_FEATURE_MAP = {
     'exp5': [0, 1, 2, 3, 4, 5, 8],
     'exp6': [0, 1, 2, 3, 4, 5, 6, 7, 8],
 }
+
+def get_num_channels(feature_mode):
+    return 2 + len(EXTRA_FEATURE_MAP[feature_mode]) + 1
 
 def get_args():
     parser = argparse.ArgumentParser(description='GRIP++ Evaluation')
@@ -157,7 +161,7 @@ def main():
     
     # 1. Feature Mode에 따른 자동 입력 채널 설정
     feature_mode = cfg['exp']['feature_mode']
-    in_channels = 9
+    in_channels = get_num_channels(feature_mode)
     
     # 2. 모델 로드
     model = Model(in_channels=in_channels, 

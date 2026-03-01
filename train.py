@@ -27,6 +27,10 @@ EXTRA_FEATURE_MAP = {
     'exp6': [0, 1, 2, 3, 4, 5, 6, 7, 8],
 }
 
+
+def get_num_channels(feature_mode):
+    return 2 + len(EXTRA_FEATURE_MAP[feature_mode]) + 1
+
 def seed_everything(seed):
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -141,7 +145,7 @@ def main():
     
     # 1. 환경 및 경로 설정 (Resume을 위해 상단으로 이동)
     feature_mode = cfg['exp']['feature_mode']
-    in_channels = 9
+    in_channels = get_num_channels(feature_mode)  # ← 동적 계산
     
     ckpt_dir = Path(cfg['train']['ckpt_dir']) / feature_mode
     ckpt_dir.mkdir(parents=True, exist_ok=True)

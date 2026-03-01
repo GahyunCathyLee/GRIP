@@ -157,7 +157,7 @@ def main():
     
     # 1. Feature Mode에 따른 자동 입력 채널 설정
     feature_mode = cfg['exp']['feature_mode']
-    in_channels = len(EXTRA_FEATURE_MAP[feature_mode])
+    in_channels = 9
     
     # 2. 모델 로드
     model = Model(in_channels=in_channels, 

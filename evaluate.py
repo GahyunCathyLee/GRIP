@@ -57,7 +57,7 @@ def calculate_metrics(pred, target):
     # 4. RMSE @ 1s ~ 5s (Data freq가 5Hz인 경우: 5, 10, 15, 20, 25 frames)
     # 사용자의 데이터 주기에 맞춰 인덱스를 조절하세요.
     rmse_steps = {}
-    fps = 5 # 5Hz 가정
+    fps = pred.shape[1] // 5  # future_frames / 5sec -> 3Hz:3, 5Hz:5
     for s in range(1, 6):
         idx = s * fps - 1
         if idx < pred.shape[1]:

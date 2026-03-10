@@ -13,14 +13,16 @@ from model import Model
 from feeder import HighDFeeder as Feeder
 
 EXTRA_FEATURE_MAP = {
-    'baseline': [0, 1],
-    'baseline_v': [2, 3],
-    'exp1': [0, 1, 8],
-    'exp2': [0, 1, 6, 7],
-    'exp3': [6, 7],
-    'exp4': [4, 5, 6, 7, 8],
-    'exp5': [0, 1, 2, 3, 4, 5, 8],
-    'exp6': [0, 1, 2, 3, 4, 5, 6, 7, 8],
+    'baseline':      [0, 1],
+    'baseline_v':    [2, 3],
+    'baseline_full': [0, 1, 2, 3, 4, 5],
+    'importance':    [0, 1, 2, 3, 4, 5, 11],
+    'exp1':          [0, 1, 8],
+    'exp2':          [0, 1, 6, 7],
+    'exp3':          [6, 7],
+    'exp4':          [4, 5, 6, 7, 8],
+    'exp5':          [0, 1, 2, 3, 4, 5, 8],
+    'exp6':          [0, 1, 2, 3, 4, 5, 6, 7, 8],
 }
 
 def get_num_channels(feature_mode):

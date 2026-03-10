@@ -2,7 +2,7 @@
 # EXPERIMENT SETTING
 # =========================
 exp:
-  feature_mode: 'baseline'  # choices: [baseline, exp1, exp2, exp3, exp4, exp5, exp6]
+  feature_mode: 'importance'  # dx, dy, dvx, dvy, dax, day, I
   device: 'cuda:0'
   seed: 42
 
@@ -12,9 +12,9 @@ exp:
 data:
   base_dir: 'highD'
   batch_size: 512
-  num_workers: 64
-  history_frames: 15
-  future_frames: 25
+  num_workers: 32
+  history_frames: 9   # 3 sec * 3 Hz
+  future_frames: 15   # 5 sec * 3 Hz
   persistent_workers: True
 
 # =========================

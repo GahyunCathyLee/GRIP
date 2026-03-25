@@ -10,7 +10,7 @@ exp:
 # DATA PATHS & PARAMS
 # =========================
 data:
-  base_dir: 'highD/v4_7'
+  base_dir: 'highD/baseline'
   batch_size: 256
   num_workers: 24
   history_frames: 6

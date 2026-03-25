@@ -2,7 +2,7 @@ import argparse
 import os
 import yaml
 import time
-from highD.preprocess import get_num_channels
+from highD.preprocess import EXTRA_FEATURE_MAP, get_num_channels
 import numpy as np
 import torch
 import torch.nn as nn
@@ -11,22 +11,6 @@ from pathlib import Path
 
 from model import Model
 from feeder import HighDFeeder as Feeder
-
-EXTRA_FEATURE_MAP = {
-    'baseline':      [0, 1],
-    'baseline_v':    [2, 3],
-    'baseline_full': [0, 1, 2, 3, 4, 5],
-    'importance':    [0, 1, 2, 3, 4, 5, 11],
-    'exp1':          [0, 1, 8],
-    'exp2':          [0, 1, 6, 7],
-    'exp3':          [6, 7],
-    'exp4':          [4, 5, 6, 7, 8],
-    'exp5':          [0, 1, 2, 3, 4, 5, 8],
-    'exp6':          [0, 1, 2, 3, 4, 5, 6, 7, 8],
-}
-
-def get_num_channels(feature_mode):
-    return 2 + len(EXTRA_FEATURE_MAP[feature_mode]) + 1
 
 def get_args():
     parser = argparse.ArgumentParser(description='GRIP++ Evaluation')

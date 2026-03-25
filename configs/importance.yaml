@@ -2,7 +2,7 @@
 # EXPERIMENT SETTING
 # =========================
 exp:
-  feature_mode: 'importance'  # dx, dy, dvx, dvy, dax, day, I
+  feature_mode: 'importance'  # dx, dy, dvx, dvy, I
   device: 'cuda:0'
   seed: 42
 

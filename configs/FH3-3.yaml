@@ -1,0 +1,35 @@
+# =========================
+# EXPERIMENT SETTING
+# =========================
+exp:
+  feature_mode: 'importance'  # dx, dy, dvx, dvy, I
+  device: 'cuda:0'
+  seed: 3407
+
+# =========================
+# DATA PATHS & PARAMS
+# =========================
+data:
+  base_dir: 'highD/v4_7'
+  batch_size: 256
+  num_workers: 24
+  history_frames: 6   # 2 sec * 3 Hz
+  future_frames: 15   # 5 sec * 3 Hz
+  persistent_workers: True
+
+# =========================
+# MODEL PARAMS (GRIP++)
+# =========================
+model:
+  max_hop: 2
+  num_node: 9  # Ego + 8 Neighbors (MAX_NEIGHBORS + 1)
+  edge_importance_weighting: true
+
+# =========================
+# TRAINING PARAMS
+# =========================
+train:
+  epochs: 300
+  lr: 0.0001
+  weight_decay: 0.0001
+  ckpt_dir: 'ckpts'

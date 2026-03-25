@@ -132,7 +132,8 @@ def main():
     feature_mode = cfg['exp']['feature_mode']
     in_channels = get_num_channels(feature_mode)  # ← 동적 계산
     
-    ckpt_dir = Path(cfg['train']['ckpt_dir']) / feature_mode
+    config_name = Path(args.config).stem
+    ckpt_dir = Path(cfg['train']['ckpt_dir']) / config_name
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_path = ckpt_dir / "best.pt"  
 

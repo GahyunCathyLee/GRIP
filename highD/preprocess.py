@@ -27,6 +27,11 @@ NEIGHBOR_COLS_8 = [
 # Slot priority for top-N gate tie-breaking: 0 > 2 > 5 > 1 > 4 > 7 > 3 > 6
 _TOPN_SLOT_PRIORITY = {s: r for r, s in enumerate([0, 2, 5, 1, 4, 7, 3, 6])}
 
+# Empirical slot weights (mean I per slot, from dataset analysis)
+# Order: preceding, following, leftPreceding, leftAlongside, leftFollowing,
+#        rightPreceding, rightAlongside, rightFollowing
+SLOT_WEIGHTS = [0.4944, 0.0411, 0.0935, 0.0074, 0.0002, 0.5559, 0.0000, 0.1179]
+
 # ==============================================================================
 # LIS binning
 # ==============================================================================
@@ -424,6 +429,13 @@ def process_recording(rec_id, raw_dir, args):
                     else:  # 'lis' (default)
                         ix, iy, i_total = compute_importance_lis(lis, delta_lane, lc_state)
 
+                    # ── slot importance boost: I_new = min(I * (1 + alpha * w_slot), 1.0) ──
+                    if args.slot_importance_alpha > 0.0:
+                        i_total = min(
+                            i_total * (1.0 + args.slot_importance_alpha * SLOT_WEIGHTS[ki]),
+                            1.0,
+                        )
+
                     # ── gate ──────────────────────────────────────────────────
                     gate    = 1.0 if (args.gate_theta <= 0.0 or i_total >= args.gate_theta) else 0.0
 
@@ -467,8 +479,10 @@ def main():
                         help="eps for LIT denominator (makes gap dominant over dvx)")
     parser.add_argument("--gate_theta",      type=float, default=0.0,
                         help="importance threshold for gate (0.0 = disabled)")
-    parser.add_argument("--gate_topn",       type=int,   default=0,
+    parser.add_argument("--gate_topn",            type=int,   default=0,
                         help="keep top-N neighbors by I per timestep (0 = disabled)")
+    parser.add_argument("--slot_importance_alpha", type=float, default=0.0,
+                        help="slot importance boost: I_new = min(I*(1+alpha*w_slot),1.0) (0.0 = disabled)")
     parser.add_argument("--lc_version",      type=str,   default="v3",
                         choices=["v1", "v2", "v3", "v4"])
     parser.add_argument("--lis_mode",        type=str,   default="3",

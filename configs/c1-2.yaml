@@ -2,16 +2,16 @@
 # EXPERIMENT SETTING
 # =========================
 exp:
-  feature_mode: 'baseline'  # dx, dy, dvx, dvy
+  feature_mode: 'importance'  # dx, dy, dvx, dvy
   device: 'cuda:0'
-  seed: 3407
+  seed: 1234
 
 # =========================
 # DATA PATHS & PARAMS
 # =========================
 data:
-  base_dir: 'highD/baseline'
-  batch_size: 256
+  base_dir: 'highD'
+  batch_size: 1024
   num_workers: 24
   history_frames: 6
   future_frames: 15

@@ -2,7 +2,7 @@
 # EXPERIMENT SETTING
 # =========================
 exp:
-  feature_mode: 'importance'  # dx, dy, dvx, dvy, I
+  feature_mode: 'iy'  # dx, dy, dvx, dvy
   device: 'cuda:0'
   seed: 1234
 
@@ -10,11 +10,11 @@ exp:
 # DATA PATHS & PARAMS
 # =========================
 data:
-  base_dir: 'highD/v4_lit'
-  batch_size: 256
+  base_dir: 'highD'
+  batch_size: 1024
   num_workers: 24
-  history_frames: 6   # 2 sec * 3 Hz
-  future_frames: 15   # 5 sec * 3 Hz
+  history_frames: 6
+  future_frames: 15
   persistent_workers: True
 
 # =========================

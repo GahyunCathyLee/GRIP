@@ -59,6 +59,8 @@ def _apply_topn_gate(nb_feats_ti, mask_ti, n):
     for k in valid:
         if k not in selected:
             nb_feats_ti[k, 9]  = 0.0
+            nb_feats_ti[k, 10] = 0.0
+            nb_feats_ti[k, 11] = 0.0
             nb_feats_ti[k, 12] = 0.0
 
 
@@ -110,8 +112,10 @@ def compute_importance_lit(lit, delta_lane, lc_state):
 #            [6]lc_state [7]lit [8]lis [9]gate [10]I_x [11]I_y [12]I
 # ==============================================================================
 EXTRA_FEATURE_MAP = {
-    'baseline':   [0, 1, 2, 3],        # dx, dy, dvx, dvy
-    'importance': [0, 1, 2, 3, 12],    # dx, dy, dvx, dvy, I
+    'baseline':   [0, 1, 2, 3, 4, 5],        # dx, dy, dvx, dvy, dax, day
+    'importance': [0, 1, 2, 3, 4, 5, 12],    # dx, dy, dvx, dvy, dax, day, I
+    'sy':         [0, 1, 2, 3, 4, 5, 6],     # dx, dy, dvx, dvy, dax, day, lc_state
+    'iy':         [0, 1, 2, 3, 4, 5, 11],    # dx, dy, dvx, dvy, dax, day, I_y
 }
 
 
@@ -422,10 +426,10 @@ def process_recording(rec_id, raw_dir, args):
 
                     # ── gate ──────────────────────────────────────────────────
                     gate    = 1.0 if (args.gate_theta <= 0.0 or i_total >= args.gate_theta) else 0.0
-                    i_total = i_total * gate
 
                     nb_all_feats[ki, ti] = [dx, dy, dvx, dvy, dax, day,
-                                            lc_state, lit, lis, gate, ix, iy, i_total]
+                                            lc_state, lit, lis, gate,
+                                            ix * gate, iy * gate, i_total * gate]
                     nb_mask_mat[ki, ti]  = True
 
                 # Apply gate_topn per timestep after all slots are filled
@@ -456,7 +460,7 @@ def main():
     parser.add_argument("--raw_dir",         type=str,   default="highD/raw")
     parser.add_argument("--out_dir",         type=str,   default="highD")
     parser.add_argument("--feature_mode",    type=str,   default="baseline",
-                        choices=['baseline', 'importance'])
+                        choices=['baseline', 'importance', 'sy', 'iy'])
     parser.add_argument("--normalize_flip",  action="store_true", default=True)
     parser.add_argument("--seed",            type=int,   default=42)
     parser.add_argument("--eps_gate",        type=float, default=1.0,

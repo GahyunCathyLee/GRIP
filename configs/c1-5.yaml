@@ -4,7 +4,7 @@
 exp:
   feature_mode: 'importance'  # dx, dy, dvx, dvy
   device: 'cuda:0'
-  seed: 3407
+  seed: 777
 
 # =========================
 # DATA PATHS & PARAMS

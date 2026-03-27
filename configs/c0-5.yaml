@@ -2,9 +2,9 @@
 # EXPERIMENT SETTING
 # =========================
 exp:
-  feature_mode: 'importance'  # dx, dy, dvx, dvy
+  feature_mode: 'baseline'  # dx, dy, dvx, dvy
   device: 'cuda:0'
-  seed: 42
+  seed: 777
 
 # =========================
 # DATA PATHS & PARAMS

@@ -16,7 +16,7 @@ T_H           = 6    # 3 sec * 3 Hz (history)
 T_F           = 15   # 5 sec * 3 Hz (future)
 STRIDE_SEC    = 1.0
 MAX_NEIGHBORS = 8
-NB_DIM        = 13   # dx, dy, dvx, dvy, dax, day, lc_state, lit, lis, gate, I_x, I_y, I
+NB_DIM        = 13   # dx, dy, dvx, dvy, dax, day, lc_state, volume, size_bin, gate, I_x, I_y, I
 
 NEIGHBOR_COLS_8 = [
     "precedingId", "followingId",
@@ -31,6 +31,32 @@ _TOPN_SLOT_PRIORITY = {s: r for r, s in enumerate([0, 2, 5, 1, 4, 7, 3, 6])}
 # Order: preceding, following, leftPreceding, leftAlongside, leftFollowing,
 #        rightPreceding, rightAlongside, rightFollowing
 SLOT_WEIGHTS = [0.4944, 0.0411, 0.0935, 0.0074, 0.0002, 0.5559, 0.0000, 0.1179]
+
+# ==============================================================================
+# Vehicle size bin
+# ==============================================================================
+_VOLUME_BIN_EDGES = [12.0, 20.0, 90.0, 150.0]  # 4 inner cuts → 5 bins (0~4)
+
+
+def _volume_bin(phys_length, phys_width, vehicle_class):
+    """Return (size_bin 0~4, raw volume m³) for a neighbor vehicle.
+
+    height estimated from vehicle class and physical length:
+      Car:   length < 4.5m → 1.45m,  < 5.0m → 1.70m,  >= 5.0m → 1.90m
+      Truck: length < 12.0m → 2.75m, >= 12.0m → 3.75m
+    """
+    if vehicle_class == "Car":
+        if phys_length < 4.5:   height = 1.45
+        elif phys_length < 5.0: height = 1.70
+        else:                   height = 1.90
+    else:
+        height = 2.75 if phys_length < 12.0 else 3.75
+    volume = phys_width * phys_length * height
+    for i, edge in enumerate(_VOLUME_BIN_EDGES):
+        if volume < edge:
+            return float(i), volume
+    return 4.0, volume
+
 
 # ==============================================================================
 # LIS binning
@@ -114,13 +140,14 @@ def compute_importance_lit(lit, delta_lane, lc_state):
 # ==============================================================================
 # Feature mode index map
 # NB_DIM=13: [0]dx [1]dy [2]dvx [3]dvy [4]dax [5]day
-#            [6]lc_state [7]lit [8]lis [9]gate [10]I_x [11]I_y [12]I
+#            [6]lc_state [7]volume [8]size_bin [9]gate [10]I_x [11]I_y [12]I
 # ==============================================================================
 EXTRA_FEATURE_MAP = {
     'baseline':   [0, 1, 2, 3, 4, 5],        # dx, dy, dvx, dvy, dax, day
     'importance': [0, 1, 2, 3, 4, 5, 12],    # dx, dy, dvx, dvy, dax, day, I
     'sy':         [0, 1, 2, 3, 4, 5, 6],     # dx, dy, dvx, dvy, dax, day, lc_state
     'iy':         [0, 1, 2, 3, 4, 5, 11],    # dx, dy, dvx, dvy, dax, day, I_y
+    'dimI':       [0, 1, 2, 3, 4, 5, 8, 11],              # dx, dy, dvx, dvy, dax, day, 
 }
 
 
@@ -182,9 +209,11 @@ def process_recording(rec_id, raw_dir, args):
         if c not in tracks.columns: tracks[c] = 0.0
     if "laneId" not in tracks.columns: tracks["laneId"] = 0
 
-    vid_to_dd = dict(zip(tmeta["id"].astype(int), tmeta["drivingDirection"].astype(int)))
-    vid_to_w  = dict(zip(tmeta["id"].astype(int), tmeta["width"].astype(float)))
-    vid_to_h  = dict(zip(tmeta["id"].astype(int), tmeta["height"].astype(float)))
+    vid_to_dd    = dict(zip(tmeta["id"].astype(int), tmeta["drivingDirection"].astype(int)))
+    vid_to_w     = dict(zip(tmeta["id"].astype(int), tmeta["width"].astype(float)))
+    vid_to_h     = dict(zip(tmeta["id"].astype(int), tmeta["height"].astype(float)))
+    vid_to_class = dict(zip(tmeta["id"].astype(int), tmeta["class"].astype(str))) \
+        if "class" in tmeta.columns else {}
 
     vid_arr   = tracks["id"].astype(np.int32).to_numpy()
     frame_arr = tracks["frame"].astype(np.int32).to_numpy()
@@ -421,6 +450,11 @@ def process_recording(rec_id, raw_dir, args):
                     lit = gap / (denom_base + (args.eps_gate if denom_base >= 0 else -args.eps_gate))
                     lis = _lit_to_lis(lit, args.lis_mode)
 
+                    nb_class  = vid_to_class.get(nid, "Car")
+                    nb_phys_l = vid_to_w.get(nid, 0.0)   # CSV width = physical length
+                    nb_phys_w = vid_to_h.get(nid, 0.0)   # CSV height = physical width
+                    size_bin, nb_volume = _volume_bin(nb_phys_l, nb_phys_w, nb_class)
+
                     delta_lane = float(abs(int(lane_arr[nr]) - int(ego_lanes[ti])))
 
                     # ── importance ────────────────────────────────────────────
@@ -440,7 +474,7 @@ def process_recording(rec_id, raw_dir, args):
                     gate    = 1.0 if (args.gate_theta <= 0.0 or i_total >= args.gate_theta) else 0.0
 
                     nb_all_feats[ki, ti] = [dx, dy, dvx, dvy, dax, day,
-                                            lc_state, lit, lis, gate,
+                                            lc_state, nb_volume, size_bin, gate,
                                             ix * gate, iy * gate, i_total * gate]
                     nb_mask_mat[ki, ti]  = True
 

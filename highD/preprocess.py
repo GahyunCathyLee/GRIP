@@ -506,7 +506,7 @@ def main():
     parser.add_argument("--raw_dir",         type=str,   default="highD/raw")
     parser.add_argument("--out_dir",         type=str,   default="highD")
     parser.add_argument("--feature_mode",    type=str,   default="baseline",
-                        choices=['baseline', 'importance', 'sy', 'iy'])
+                        choices=['baseline', 'importance', 'sy', 'iy', 'dimI'])
     parser.add_argument("--normalize_flip",  action="store_true", default=True)
     parser.add_argument("--seed",            type=int,   default=42)
     parser.add_argument("--eps_gate",        type=float, default=1.0,

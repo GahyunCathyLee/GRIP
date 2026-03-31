@@ -148,6 +148,7 @@ EXTRA_FEATURE_MAP = {
     'sy':         [0, 1, 2, 3, 4, 5, 6],     # dx, dy, dvx, dvy, dax, day, lc_state
     'iy':         [0, 1, 2, 3, 4, 5, 11],    # dx, dy, dvx, dvy, dax, day, I_y
     'dimI':       [0, 1, 2, 3, 4, 5, 8, 11],              # dx, dy, dvx, dvy, dax, day, 
+    'dim':        [0, 1, 2, 3, 4, 5, 8]
 }
 
 

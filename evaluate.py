@@ -256,8 +256,20 @@ def main():
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # 1. Feature Mode
-    feature_mode = cfg['exp']['feature_mode']
+    # 1. Checkpoint 먼저 로드해서 feature_mode 확인
+    checkpoint = torch.load(args.ckpt, map_location=device)
+
+    cfg_feature_mode  = cfg['exp']['feature_mode']
+    ckpt_feature_mode = checkpoint.get('feature_mode', None)
+
+    if ckpt_feature_mode is not None and ckpt_feature_mode != cfg_feature_mode:
+        print(f"[WARN] config feature_mode={cfg_feature_mode!r} != "
+              f"checkpoint feature_mode={ckpt_feature_mode!r}")
+        print(f"[INFO] checkpoint feature_mode={ckpt_feature_mode!r} 으로 override합니다.")
+        feature_mode = ckpt_feature_mode
+    else:
+        feature_mode = cfg_feature_mode
+
     in_channels = get_num_channels(feature_mode)
 
     # 2. Model
@@ -265,9 +277,8 @@ def main():
                   graph_args={'max_hop': cfg['model']['max_hop'], 'num_node': cfg['model']['num_node']},
                   edge_importance_weighting=cfg['model']['edge_importance_weighting']).to(device)
 
-    checkpoint = torch.load(args.ckpt, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
-    print(f"Checkpoint Loaded: {args.ckpt}")
+    print(f"Checkpoint Loaded: {args.ckpt}  (feature_mode={feature_mode}, in_channels={in_channels})")
 
     # 3. Scenario labels
     labels_lut = None
@@ -276,9 +287,9 @@ def main():
 
     # 4. Data loader
     need_meta = labels_lut is not None
-    test_path = Path(cfg['data']['base_dir']) / cfg['exp']['feature_mode'] / "test.h5"
+    test_path = Path(cfg['data']['base_dir']) / feature_mode / "test.h5"
     if not test_path.exists():
-        test_path = Path(cfg['data']['base_dir']) / cfg['exp']['feature_mode'] / "val.h5"
+        test_path = Path(cfg['data']['base_dir']) / feature_mode / "val.h5"
 
     batch_size = cfg['data'].get('batch_size_val', cfg['data'].get('batch_size', 64))
 

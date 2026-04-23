@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-generate_scenario_labels.py  —  GRIP용 scenario_labels.csv 생성 스크립트
+scenario_label.py  —  GRIP exiD용 scenario_labels.csv 생성 스크립트
 
 h5 데이터 파일에서 meta 키(recordingId, trackId, t0_frame)를 읽고,
-../neighformer/data/highD/scenario_label.py 와 동일한 로직으로 라벨링한다.
+exiD raw CSV에서 lane-change / traffic-state 정보를 추출해 라벨링한다.
 
 Event labels (2-class):
     lane_change     : LC 발생
@@ -14,20 +14,20 @@ State labels (2-class):
     dense     : 인접 전방/alongside 슬롯 점유율 <= 0.40
     free_flow : 점유율 > 0.40
     (STATE_SLOTS = [0,2,3,5,6] → preceding, leftPreceding, leftAlongside,
-                                  rightPreceding, rightAlongside)
+                                  rightLead, rightAlongside)
 
 Usage:
     # 단일 h5 파일
-    python highD/generate_scenario_labels.py \\
-        --h5      highD/baseline/test.h5 \\
-        --raw_dir highD/raw \\
-        --out_csv highD/baseline/scenario_labels.csv
+    python exiD/scenario_label.py \\
+        --h5      exiD/baseline/test.h5 \\
+        --raw_dir exiD/raw \\
+        --out_csv exiD/baseline/scenario_labels.csv
 
     # 여러 split을 한 번에 (test + val 합쳐서 하나의 CSV)
-    python highD/generate_scenario_labels.py \\
-        --h5      highD/baseline/test.h5 highD/baseline/val.h5 \\
-        --raw_dir highD/raw \\
-        --out_csv highD/baseline/scenario_labels.csv
+    python exiD/scenario_label.py \\
+        --h5      exiD/baseline/test.h5 exiD/baseline/val.h5 \\
+        --raw_dir exiD/raw \\
+        --out_csv exiD/baseline/scenario_labels.csv
 """
 
 from __future__ import annotations
@@ -103,29 +103,24 @@ def smart_read_csv(path: Path) -> pd.DataFrame:
 def normalize_tracks(tracks: pd.DataFrame, xx: str) -> pd.DataFrame:
     df = tracks.copy()
     df.columns = [c.strip() for c in df.columns]
-    df["recordingId"] = int(xx)
     if "trackId" not in df.columns:
-        df["trackId"] = df["id"]
+        raise KeyError("normalize_tracks: missing required column 'trackId'")
+    if "recordingId" not in df.columns:
+        df["recordingId"] = int(xx)
+    if "laneId" not in df.columns:
+        if "laneletId" in df.columns:
+            df["laneId"] = df["laneletId"]
+        else:
+            raise KeyError("normalize_tracks: missing required column 'laneletId'")
     if "latVelocity" not in df.columns:
         df["latVelocity"] = df.get("yVelocity", np.nan)
-    if "leadId" not in df.columns:
-        df["leadId"] = df.get("precedingId", 0)
-    if "rearId" not in df.columns:
-        df["rearId"] = df.get("followingId", 0)
-    rename = {
-        "leftPrecedingId":   "leftLeadId",
-        "leftFollowingId":   "leftRearId",
-        "rightPrecedingId":  "rightLeadId",
-        "rightFollowingId":  "rightRearId",
-        "rightAlsongsideId": "rightAlongsideId",
-    }
-    for src, dst in rename.items():
-        if src in df.columns and dst not in df.columns:
-            df = df.rename(columns={src: dst})
+    for col in ["leadId", "rearId"]:
+        if col not in df.columns:
+            df[col] = -1
     for col in ["leftLeadId", "leftRearId", "leftAlongsideId",
                 "rightLeadId", "rightRearId", "rightAlongsideId"]:
         if col not in df.columns:
-            df[col] = 0
+            df[col] = -1
     for col in ["frame", "laneId", "trackId", "recordingId"]:
         if col not in df.columns:
             raise KeyError(f"normalize_tracks: missing required column '{col}'")
@@ -136,7 +131,7 @@ def normalize_recmeta(recmeta: pd.DataFrame, xx: str) -> pd.DataFrame:
     rm = recmeta.copy()
     rm.columns = [c.strip() for c in rm.columns]
     if "recordingId" not in rm.columns:
-        rm["recordingId"] = rm["id"] if "id" in rm.columns else int(xx)
+        rm["recordingId"] = int(xx)
     rm["recordingId"] = rm["recordingId"].astype(int)
     if "frameRate" not in rm.columns:
         raise KeyError("recordingMeta missing 'frameRate'")
@@ -170,7 +165,7 @@ def get_lane_at(lookup, track_id: int, frame: int) -> Optional[int]:
 
 
 def is_adjacent_lane(ego_lane: int, nb_lane: int) -> bool:
-    return abs(int(ego_lane) - int(nb_lane)) == 1
+    return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -178,6 +173,17 @@ def is_adjacent_lane(ego_lane: int, nb_lane: int) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def detect_lane_change(w: pd.DataFrame) -> Tuple[bool, int, Optional[int]]:
+    if "laneChange" in w.columns and "frame" in w.columns:
+        df = w[["frame", "laneChange"]].copy()
+        df["frame"]      = pd.to_numeric(df["frame"],      errors="coerce").astype("Int64")
+        df["laneChange"] = pd.to_numeric(df["laneChange"], errors="coerce")
+        df = df.dropna().sort_values("frame")
+        lc_rows = df[df["laneChange"] == 1]
+        count = len(lc_rows)
+        if count == 0:
+            return False, 0, None
+        return True, count, int(lc_rows["frame"].iloc[0])
+
     if "laneId" not in w.columns or "frame" not in w.columns:
         return False, 0, None
     df = w[["frame", "laneId"]].copy()
@@ -197,7 +203,7 @@ def detect_lane_change(w: pd.DataFrame) -> Tuple[bool, int, Optional[int]]:
 
 
 def infer_lc_direction(w: pd.DataFrame, lc_frame: int, K: int = 5) -> Optional[str]:
-    vcol = "yVelocity" if "yVelocity" in w.columns else "latVelocity"
+    vcol = "latVelocity" if "latVelocity" in w.columns else "yVelocity"
     if vcol not in w.columns:
         return None
     df = w.copy()
@@ -429,7 +435,7 @@ def read_h5_meta(h5_paths: List[Path]) -> Tuple[np.ndarray, np.ndarray, np.ndarr
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
-        description="GRIP highD scenario label generator",
+        description="GRIP exiD scenario label generator",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     ap.add_argument(
@@ -437,8 +443,8 @@ def parse_args() -> argparse.Namespace:
         help="h5 파일 경로 (test.h5, val.h5 등 여러 개 가능)",
     )
     ap.add_argument(
-        "--raw_dir", default="highD/raw",
-        help="highD raw CSV 디렉토리 (XX_tracks.csv, XX_recordingMeta.csv 포함)",
+        "--raw_dir", default="exiD/raw",
+        help="exiD raw CSV 디렉토리 (XX_tracks.csv, XX_recordingMeta.csv 포함)",
     )
     ap.add_argument(
         "--out_csv", default=None,

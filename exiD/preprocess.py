@@ -1,5 +1,6 @@
 import os
 import bisect
+import math
 import pandas as pd
 import numpy as np
 import h5py
@@ -23,6 +24,8 @@ NEIGHBOR_COLS_8 = [
     "leftLeadId", "leftAlongsideId", "leftRearId",
     "rightLeadId", "rightAlongsideId", "rightRearId",
 ]
+
+VRU_CLASSES = {"motorcycle", "bicycle", "pedestrian"}
 
 # Slot priority for top-N gate tie-breaking: 0 > 2 > 5 > 1 > 4 > 7 > 3 > 6
 _TOPN_SLOT_PRIORITY = {s: r for r, s in enumerate([0, 2, 5, 1, 4, 7, 3, 6])}
@@ -290,6 +293,45 @@ def _first_numeric_series(df, col, default, dtype):
     return pd.to_numeric(s, errors="coerce").fillna(default).astype(dtype).to_numpy()
 
 
+def _first_available_numeric_series(df, cols, default, dtype):
+    for col in cols:
+        if col in df.columns:
+            return _first_numeric_series(df, col, default, dtype)
+    return np.full(len(df), default, dtype=dtype)
+
+
+def _fill_derivatives_from_position(per_vid_rows, frame_arr, pos_arr, out_arr, frame_rate):
+    for idxs in per_vid_rows.values():
+        if len(idxs) < 2:
+            continue
+        t = frame_arr[idxs].astype(np.float32) / float(frame_rate)
+        p = pos_arr[idxs].astype(np.float32)
+        out_arr[idxs] = np.gradient(p, t).astype(np.float32)
+
+
+def _rot2d(vx, vy, h_rad):
+    c, s = math.cos(h_rad), math.sin(h_rad)
+    return c * vx + s * vy, -s * vx + c * vy
+
+
+def _norm_pos(gx, gy, ref_x, ref_y, ref_hdg_rad):
+    return _rot2d(gx - ref_x, gy - ref_y, ref_hdg_rad)
+
+
+def _local_to_norm_frame(lon, lat, veh_hdg_rad, ref_hdg_rad):
+    delta = veh_hdg_rad - ref_hdg_rad
+    c, s = math.cos(delta), math.sin(delta)
+    return c * lon - s * lat, s * lon + c * lat
+
+
+def _rel_local_in_ego_frame(nb_lon, nb_lat, nb_hdg, ego_lon, ego_lat, ego_hdg):
+    nb_vx = nb_lon * math.cos(nb_hdg) - nb_lat * math.sin(nb_hdg)
+    nb_vy = nb_lon * math.sin(nb_hdg) + nb_lat * math.cos(nb_hdg)
+    ego_vx = ego_lon * math.cos(ego_hdg) - ego_lat * math.sin(ego_hdg)
+    ego_vy = ego_lon * math.sin(ego_hdg) + ego_lat * math.cos(ego_hdg)
+    return _rot2d(nb_vx - ego_vx, nb_vy - ego_vy, ego_hdg)
+
+
 def balanced_recording_split(ds_counts, ratios=(0.7, 0.1, 0.2), seed=42):
     rng = np.random.default_rng(seed)
     total_samples = sum(ds_counts.values())
@@ -332,22 +374,41 @@ def process_recording(rec_id, raw_dir, args):
 
     meta_id_col = "trackId" if "trackId" in tmeta.columns else "id"
     vid_to_dd    = {int(v): 2 for v in tracks["trackId"].astype(int).unique()}
-    vid_to_class = dict(zip(tmeta[meta_id_col].astype(int), tmeta["class"].astype(str))) \
-        if "class" in tmeta.columns else {}
+    vid_to_class = {
+        int(k): str(v).strip().lower()
+        for k, v in zip(tmeta[meta_id_col].astype(int), tmeta["class"].astype(str))
+    } if "class" in tmeta.columns else {}
 
     tracks = tracks.sort_values(["trackId", "frame"], kind="mergesort").reset_index(drop=True)
     vid_arr   = tracks["trackId"].astype(np.int32).to_numpy()
     frame_arr = tracks["frame"].astype(np.int32).to_numpy()
-    x_arr     = tracks["xCenter"].astype(np.float32).to_numpy().copy()
-    y_arr     = tracks["yCenter"].astype(np.float32).to_numpy().copy()
-    xv_arr    = tracks["lonVelocity"].astype(np.float32).to_numpy()
-    yv_arr    = tracks["latVelocity"].astype(np.float32).to_numpy()
-    xa_arr    = tracks["lonAcceleration"].astype(np.float32).to_numpy()
-    ya_arr    = tracks["latAcceleration"].astype(np.float32).to_numpy()
+    x_arr     = _first_available_numeric_series(tracks, ["xCenter", "x"], 0.0, np.float32).copy()
+    y_arr     = _first_available_numeric_series(tracks, ["yCenter", "y"], 0.0, np.float32).copy()
+
+    # GRIP baseline channels must live in the same coordinate frame as target
+    # (xCenter/yCenter deltas). Prefer exiD's global kinematics when present;
+    # otherwise derive them from the global positions below.
+    has_global_velocity = "xVelocity" in tracks.columns and "yVelocity" in tracks.columns
+    has_global_accel = "xAcceleration" in tracks.columns and "yAcceleration" in tracks.columns
+    xv_arr    = _first_available_numeric_series(tracks, ["xVelocity"], 0.0, np.float32)
+    yv_arr    = _first_available_numeric_series(tracks, ["yVelocity"], 0.0, np.float32)
+    xa_arr    = _first_available_numeric_series(tracks, ["xAcceleration"], 0.0, np.float32)
+    ya_arr    = _first_available_numeric_series(tracks, ["yAcceleration"], 0.0, np.float32)
+    lon_v_arr = _first_available_numeric_series(tracks, ["lonVelocity", "xVelocity"], 0.0, np.float32)
+    lat_v_arr = _first_available_numeric_series(tracks, ["latVelocity", "yVelocity"], 0.0, np.float32)
+    lon_a_arr = _first_available_numeric_series(tracks, ["lonAcceleration", "xAcceleration"], 0.0, np.float32)
+    lat_a_arr = _first_available_numeric_series(tracks, ["latAcceleration", "yAcceleration"], 0.0, np.float32)
+
+    # Lane-change heuristics are lateral-lane based, so keep a separate lateral
+    # velocity stream instead of reusing global yVelocity on intersection scenes.
+    lat_lc_v_arr = lat_v_arr
     lane_arr  = tracks["laneletId"].fillna(-1).astype(np.int32).to_numpy().copy()
     dd_arr   = np.array([vid_to_dd.get(int(v), 0) for v in vid_arr], np.int8)
     width_arr  = tracks["width"].astype(np.float32).to_numpy() if "width" in tracks.columns else np.zeros(len(tracks), np.float32)
     length_arr = tracks["length"].astype(np.float32).to_numpy() if "length" in tracks.columns else np.zeros(len(tracks), np.float32)
+    heading_arr = np.deg2rad(
+        _first_available_numeric_series(tracks, ["heading"], 0.0, np.float32)
+    ).astype(np.float32)
 
     if "latLaneCenterOffset" in tracks.columns:
         lat_lane_offset_arr = _first_numeric_series(tracks, "latLaneCenterOffset", 0.0, np.float32)
@@ -373,6 +434,18 @@ def process_recording(rec_id, raw_dir, args):
         per_vid_rows[int(v)] = idxs
         per_vid_frame_to_row[int(v)] = {int(frame_arr[r]): int(r) for r in idxs}
 
+    per_vid_frame_to_hdg = {
+        int(v): {int(frame_arr[r]): float(heading_arr[r]) for r in idxs}
+        for v, idxs in per_vid_rows.items()
+    }
+
+    if not has_global_velocity:
+        _fill_derivatives_from_position(per_vid_rows, frame_arr, x_arr, xv_arr, frame_rate)
+        _fill_derivatives_from_position(per_vid_rows, frame_arr, y_arr, yv_arr, frame_rate)
+    if not has_global_accel:
+        _fill_derivatives_from_position(per_vid_rows, frame_arr, xv_arr, xa_arr, frame_rate)
+        _fill_derivatives_from_position(per_vid_rows, frame_arr, yv_arr, ya_arr, frame_rate)
+
     nb_ids_all = np.stack([_first_numeric_series(tracks, c, -1, np.int32)
                            for c in NEIGHBOR_COLS_8], axis=1)
 
@@ -394,6 +467,9 @@ def process_recording(rec_id, raw_dir, args):
     samples = []
 
     for v, idxs in per_vid_rows.items():
+        if args.drop_vru and vid_to_class.get(int(v), "") in VRU_CLASSES:
+            continue
+
         frs = frame_arr[idxs]
         if len(frs) < (T_H + T_F) * step:
             continue
@@ -424,6 +500,11 @@ def process_recording(rec_id, raw_dir, args):
             eya = ya_arr[ego_rows]
             ego_lanes = lane_arr[ego_rows].astype(np.int32)
             len_ego   = float(vid_to_w.get(v, 0.0))
+            ego_hdg_arr = np.array(
+                [per_vid_frame_to_hdg.get(int(v), {}).get(int(hf), 0.0) for hf in hist_frames],
+                np.float32,
+            )
+            ref_hdg = float(ego_hdg_arr[-1])
 
             # ── conditional slot weight context ───────────────────────────────
             _lc_lane_lv, _lc_frame_ti, _lc_type = -1, None, -1
@@ -439,7 +520,17 @@ def process_recording(rec_id, raw_dir, args):
 
             # Ego node: ch 0,1 = vx,vy  /  is_ego = 1
             norm_center = np.array([ex[-1], ey[-1]], np.float32)
-            tensor[0, :, ego_vel_ch] = np.stack([exv, eyv], axis=1)
+            if args.normalize_heading:
+                ego_vel = np.array([
+                    _local_to_norm_frame(
+                        float(lon_v_arr[r]), float(lat_v_arr[r]),
+                        float(ego_hdg_arr[ti]), ref_hdg,
+                    )
+                    for ti, r in enumerate(ego_rows)
+                ], dtype=np.float32)
+            else:
+                ego_vel = np.stack([exv, eyv], axis=1)
+            tensor[0, :, ego_vel_ch] = ego_vel
             tensor[0, :, is_ego_ch]  = 1.0
 
             # Neighbor IDs determined at obs_frame (last history frame)
@@ -450,6 +541,8 @@ def process_recording(rec_id, raw_dir, args):
             for ki in range(MAX_NEIGHBORS):
                 nid = int(ids8_obs[ki])
                 if nid <= 0: continue
+                if args.drop_vru and vid_to_class.get(nid, "") in VRU_CLASSES:
+                    continue
                 rm = per_vid_frame_to_row.get(nid)
                 if rm is None: continue
                 nb_rows_ki = [rm.get(int(hf)) for hf in hist_frames]
@@ -463,17 +556,36 @@ def process_recording(rec_id, raw_dir, args):
             for ti, hf in enumerate(hist_frames):
                 for ki, (nid, nb_rows_ki) in valid_nbs.items():
                     nr = nb_rows_ki[ti]
-
-                    dx  = float(x_arr[nr]  - ex[ti])
-                    dy  = float(y_arr[nr]  - ey[ti])
-                    dvx = float(xv_arr[nr] - exv[ti])
-                    dvy = float(yv_arr[nr] - eyv[ti])
-                    dax = float(xa_arr[nr] - exa[ti])
-                    day = float(ya_arr[nr] - eya[ti])
+                    if args.normalize_heading:
+                        ego_hdg_ti = float(ego_hdg_arr[ti])
+                        nb_hdg = float(
+                            per_vid_frame_to_hdg.get(nid, {}).get(int(hf), ego_hdg_ti)
+                        )
+                        dx, dy = _norm_pos(
+                            float(x_arr[nr]), float(y_arr[nr]),
+                            float(ex[ti]), float(ey[ti]), ego_hdg_ti,
+                        )
+                        dvx, dvy = _rel_local_in_ego_frame(
+                            float(lon_v_arr[nr]), float(lat_v_arr[nr]), nb_hdg,
+                            float(lon_v_arr[ego_rows[ti]]), float(lat_v_arr[ego_rows[ti]]),
+                            ego_hdg_ti,
+                        )
+                        dax, day = _rel_local_in_ego_frame(
+                            float(lon_a_arr[nr]), float(lat_a_arr[nr]), nb_hdg,
+                            float(lon_a_arr[ego_rows[ti]]), float(lat_a_arr[ego_rows[ti]]),
+                            ego_hdg_ti,
+                        )
+                    else:
+                        dx  = float(x_arr[nr]  - ex[ti])
+                        dy  = float(y_arr[nr]  - ey[ti])
+                        dvx = float(xv_arr[nr] - exv[ti])
+                        dvy = float(yv_arr[nr] - eyv[ti])
+                        dax = float(xa_arr[nr] - exa[ti])
+                        day = float(ya_arr[nr] - eya[ti])
 
                     # ── lc_state ─────────────────────────────────────────────
                     if args.lc_version == "v1":
-                        vyn = float(yv_arr[nr])
+                        vyn = float(lat_lc_v_arr[nr])
                         if ki < 2:
                             lc_state = 1.0
                         elif abs(vyn) < args.vy_eps:
@@ -483,16 +595,17 @@ def process_recording(rec_id, raw_dir, args):
                         else:
                             lc_state = 0.0 if vyn > 0 else 2.0
                     elif args.lc_version == "v2":
-                        abs_dvy = abs(dvy)
+                        dlatv = float(lat_lc_v_arr[nr] - lat_lc_v_arr[ego_rows[ti]])
+                        abs_dvy = abs(dlatv)
                         if ki < 2 and abs(dy) < args.dy_same:
                             lc_state = 2.0 if abs_dvy > args.dvy_eps_same else 1.0
                         elif ki >= 2:
-                            lc_state = (0.0 if dy * dvy < 0 else 2.0) \
+                            lc_state = (0.0 if dy * dlatv < 0 else 2.0) \
                                 if abs_dvy > args.dvy_eps_cross else 1.0
                         else:
-                            lc_state = 0.0 if dy * dvy < 0 else 2.0
+                            lc_state = 0.0 if dy * dlatv < 0 else 2.0
                     elif args.lc_version == "v3":
-                        nb_lat_v = float(yv_arr[nr])
+                        nb_lat_v = float(lat_lc_v_arr[nr])
                         nb_lco   = float(lat_lane_offset_arr[nr])
                         if ki < 2:   # same lane (lead / rear)
                             if (nb_lco < -1.0 and nb_lat_v > 0.0) or \
@@ -513,7 +626,7 @@ def process_recording(rec_id, raw_dir, args):
                             elif nb_lat_v >  0.029: lc_state = 0.0
                             else:                   lc_state = 1.0
                     else:  # v4: lco_norm 기반 경계 판단 + slot별 방향 결정
-                        nb_lat_v    = float(yv_arr[nr])
+                        nb_lat_v    = float(lat_lc_v_arr[nr])
                         nb_lco      = float(lat_lane_offset_arr[nr])
                         nb_lw       = float(lat_lane_width_arr[nr])
                         nb_lco_norm = nb_lco / (nb_lw * 0.5) if nb_lw > 0.5 else 0.0
@@ -579,9 +692,19 @@ def process_recording(rec_id, raw_dir, args):
                 tensor[ki + 1, :, nb_feat_ch] = nb_all_feats[ki, :, :][:, selected_indices]
                 adj[0, ki + 1] = adj[ki + 1, 0] = 1.0
 
-            # Target: future (x, y) relative to last observed ego position
-            fut_xy = np.stack([x_arr[fut_rows], y_arr[fut_rows]], axis=1)  # (T_F, 2)
-            target = fut_xy - norm_center
+            # Target: future (x, y) relative to last observed ego position.
+            # With heading normalization, rotate into the last-observed ego frame.
+            if args.normalize_heading:
+                target = np.array([
+                    _norm_pos(
+                        float(x_arr[r]), float(y_arr[r]),
+                        float(norm_center[0]), float(norm_center[1]), ref_hdg,
+                    )
+                    for r in fut_rows
+                ], dtype=np.float32)
+            else:
+                fut_xy = np.stack([x_arr[fut_rows], y_arr[fut_rows]], axis=1)  # (T_F, 2)
+                target = fut_xy - norm_center
 
             samples.append({"input": tensor, "adj": adj, "target": target,
                             "recordingId": int(rec_id), "trackId": int(v),
@@ -603,6 +726,19 @@ def main():
                         choices=['baseline', 'importance', 'sy', 'iy', 'dimI'])
     parser.add_argument("--normalize_flip",  action="store_true", default=False,
                         help="Kept for CLI compatibility; exiD coordinates are not highD-flipped.")
+    parser.add_argument("--normalize_heading", "--normalize-heading",
+                        action="store_true", default=True,
+                        help="Normalize exiD coordinates into the ego-heading local frame.")
+    parser.add_argument("--no_normalize_heading", "--no-normalize-heading",
+                        action="store_false",
+                        dest="normalize_heading",
+                        help="Keep raw global x/y axes instead of ego-heading normalization.")
+    parser.add_argument("--drop_vru", "--drop-vru",
+                        action="store_true", default=True,
+                        help="Drop ego samples and neighbors whose class is motorcycle/bicycle/pedestrian.")
+    parser.add_argument("--keep_vru", "--keep-vru",
+                        action="store_true", default=False,
+                        help="Disable --drop_vru and keep VRU tracks.")
     parser.add_argument("--seed",            type=int,   default=42)
     parser.add_argument("--eps_gate",        type=float, default=1.0,
                         help="eps for LIT denominator (makes gap dominant over dvx)")
@@ -627,6 +763,8 @@ def main():
     parser.add_argument("--dvy_eps_same",    type=float, default=1.03)
     parser.add_argument("--dy_same",         type=float, default=1.5)
     args = parser.parse_args()
+    if args.keep_vru:
+        args.drop_vru = False
 
     raw_path = Path(args.raw_dir)
     rec_ids  = sorted(set([
@@ -637,6 +775,8 @@ def main():
     num_c       = get_num_channels(args.feature_mode)
     print(f"Found {len(rec_ids)} recordings")
     print(f"Feature mode     : {args.feature_mode}")
+    print(f"drop_vru         : {args.drop_vru}")
+    print(f"normalize_heading: {args.normalize_heading}")
     print(f"lc_version       : {args.lc_version}")
     print(f"importance_mode  : {args.importance_mode}"
           + (f"  lis_mode={args.lis_mode}" if args.importance_mode == 'lis' else ""))
@@ -667,6 +807,9 @@ def main():
             print(f"-> {split_name}: empty, skipping")
             continue
         with h5py.File(out_dir / f"{split_name}.h5", "w") as f:
+            f.attrs["drop_vru"] = bool(args.drop_vru)
+            f.attrs["normalize_heading"] = bool(args.normalize_heading)
+            f.attrs["feature_mode"] = args.feature_mode
             f.create_dataset("input",  data=np.array([s["input"]  for s in split_data]), compression="gzip")
             f.create_dataset("adj",    data=np.array([s["adj"]    for s in split_data]), compression="gzip")
             f.create_dataset("target", data=np.array([s["target"] for s in split_data]), compression="gzip")

@@ -16,7 +16,7 @@ T_H           = 6    # 3 sec * 3 Hz (history)
 T_F           = 15   # 5 sec * 3 Hz (future)
 STRIDE_SEC    = 1.0
 MAX_NEIGHBORS = 8
-NB_DIM        = 13   # dx, dy, dvx, dvy, dax, day, lc_state, volume, size_bin, gate, I_x, I_y, I
+NB_DIM        = 10   # dx, dy, dvx, dvy, dax, day, s_x, s_y, dim, I
 
 NEIGHBOR_COLS_8 = [
     "precedingId", "followingId",
@@ -130,19 +130,17 @@ def _lit_to_lis(lit, lis_mode):
 
 def _apply_topn_gate(nb_feats_ti, mask_ti, n):
     """Apply top-N gate in-place for one timestep.
-    nb_feats_ti: (MAX_NEIGHBORS, NB_DIM) — gate at [9], I at [12]
+    nb_feats_ti: (MAX_NEIGHBORS, NB_DIM) — I at [9]
     mask_ti:     (MAX_NEIGHBORS,) bool
     """
     K_local = nb_feats_ti.shape[0]
     valid = [k for k in range(K_local) if mask_ti[k]]
-    valid.sort(key=lambda k: (-nb_feats_ti[k, 12], _TOPN_SLOT_PRIORITY.get(k, K_local)))
+    valid.sort(key=lambda k: (-nb_feats_ti[k, 9], _TOPN_SLOT_PRIORITY.get(k, K_local)))
     selected = set(valid[:n])
     for k in valid:
         if k not in selected:
-            nb_feats_ti[k, 9]  = 0.0
-            nb_feats_ti[k, 10] = 0.0
-            nb_feats_ti[k, 11] = 0.0
-            nb_feats_ti[k, 12] = 0.0
+            nb_feats_ti[k] = 0.0
+            mask_ti[k] = False
 
 
 def _lane_id_to_level(lid, dd, sorted_lids, post_flip):
@@ -205,59 +203,25 @@ def _get_slot_weight(ki, ti, lane_level, lc_frame_ti, lc_type):
 
 
 # ==============================================================================
-# Importance parameters and functions
+# Importance
 # ==============================================================================
-# [importance_mode='lis']  — default
-# I_x = exp(-(lis^2)/(2*sx^2)) * exp(-ax*lc_state) * exp(-bx*delta_lane)
-# I_y = exp(-(lc_state^2)/(2*sy^2)) * exp(-ay*|lis|^py) * exp(-by*delta_lane)
-IMPORTANCE_PARAMS_LIS = {
-    'sx': 1.0, 'ax': 0.15, 'bx': 0.2,
-    'sy': 2.0, 'ay': 0.1,  'by': 0.1, 'py': 1.5,
-}
 
-# [importance_mode='lit']  — legacy params
-# I_x = exp(-(lit^2)/(2*sx^2)) * exp(-ax*lc_state) * exp(-bx*delta_lane)
-# I_y = exp(-(lc_state^2)/(2*sy^2)) * exp(-ay*|lit|^1.5) * exp(-by*delta_lane)
-IMPORTANCE_PARAMS_LIT = {
-    'sx': 15.0, 'ax': 0.2,  'bx': 0.25,
-    'sy':  2.0, 'ay': 0.01, 'by': 0.1,
-}
-
-
-def compute_importance_lis(lis, delta_lane, lc_state):
-    p = IMPORTANCE_PARAMS_LIS
-    ix = (np.exp(-(lis ** 2) / (2.0 * p['sx'] ** 2))
-          * np.exp(-p['ax'] * lc_state)
-          * np.exp(-p['bx'] * delta_lane))
-    iy = (np.exp(-(lc_state ** 2) / (2.0 * p['sy'] ** 2))
-          * np.exp(-p['ay'] * (abs(lis) ** p['py']))
-          * np.exp(-p['by'] * delta_lane))
-    return float(ix), float(iy), float(np.sqrt((ix ** 2 + iy ** 2) / 2.0))
-
-
-def compute_importance_lit(lit, delta_lane, lc_state):
-    p = IMPORTANCE_PARAMS_LIT
-    ix = (np.exp(-(lit ** 2) / (2.0 * p['sx'] ** 2))
-          * np.exp(-p['ax'] * lc_state)
-          * np.exp(-p['bx'] * delta_lane))
-    iy = (np.exp(-(lc_state ** 2) / (2.0 * p['sy'] ** 2))
-          * np.exp(-p['ay'] * (abs(lit) ** 1.5))
-          * np.exp(-p['by'] * delta_lane))
-    return float(ix), float(iy), float(np.sqrt((ix ** 2 + iy ** 2) / 2.0))
+def compute_importance(s_x, s_y, lambda_x, lambda_y, alpha, beta):
+    """I = exp(-lambda_x*|s_x|^alpha - lambda_y*s_y^beta)."""
+    return float(np.exp(-lambda_x * (abs(s_x) ** alpha) - lambda_y * (s_y ** beta)))
 
 
 # ==============================================================================
 # Feature mode index map
-# NB_DIM=13: [0]dx [1]dy [2]dvx [3]dvy [4]dax [5]day
-#            [6]lc_state [7]volume [8]size_bin [9]gate [10]I_x [11]I_y [12]I
+# NB_DIM=10: [0]dx [1]dy [2]dvx [3]dvy [4]dax [5]day [6]s_x [7]s_y [8]dim [9]I
 # ==============================================================================
 EXTRA_FEATURE_MAP = {
     'baseline':   [0, 1, 2, 3, 4, 5],        # dx, dy, dvx, dvy, dax, day
-    'importance': [0, 1, 2, 3, 4, 5, 12],    # dx, dy, dvx, dvy, dax, day, I
-    'sy':         [0, 1, 2, 3, 4, 5, 6],     # dx, dy, dvx, dvy, dax, day, lc_state
-    'iy':         [0, 1, 2, 3, 4, 5, 11],    # dx, dy, dvx, dvy, dax, day, I_y
-    'dimI':       [0, 1, 2, 3, 4, 5, 8, 11],              # dx, dy, dvx, dvy, dax, day, 
-    'dim':        [0, 1, 2, 3, 4, 5, 8]
+    'importance': [0, 1, 2, 3, 4, 5, 9],     # dx, dy, dvx, dvy, dax, day, I
+    'sy':         [0, 1, 2, 3, 4, 5, 7],     # dx, dy, dvx, dvy, dax, day, s_y
+    'iy':         [0, 1, 2, 3, 4, 5, 9],     # legacy alias: I
+    'dimI':       [0, 1, 2, 3, 4, 5, 8, 9],  # dx, dy, dvx, dvy, dax, day, dim, I
+    'dim':        [0, 1, 2, 3, 4, 5, 8],
 }
 
 
@@ -508,60 +472,20 @@ def process_recording(rec_id, raw_dir, args):
                     dax = float(xa_arr[nr] - exa[ti])
                     day = float(ya_arr[nr] - eya[ti])
 
-                    # ── lc_state ─────────────────────────────────────────────
-                    if args.lc_version == "v1":
-                        vyn = float(yv_arr[nr])
-                        if ki < 2:
-                            lc_state = 1.0
-                        elif abs(vyn) < args.vy_eps:
-                            lc_state = 1.0
-                        elif ki < 5:
-                            lc_state = 0.0 if vyn < 0 else 2.0
-                        else:
-                            lc_state = 0.0 if vyn > 0 else 2.0
-                    elif args.lc_version == "v2":
-                        abs_dvy = abs(dvy)
-                        if ki < 2 and abs(dy) < args.dy_same:
-                            lc_state = 2.0 if abs_dvy > args.dvy_eps_same else 1.0
-                        elif ki >= 2:
-                            lc_state = (0.0 if dy * dvy < 0 else 2.0) \
-                                if abs_dvy > args.dvy_eps_cross else 1.0
-                        else:
-                            lc_state = 0.0 if dy * dvy < 0 else 2.0
-                    elif args.lc_version == "v3":
-                        nb_lat_v = float(yv_arr[nr])
-                        nb_lco   = float(lat_lane_offset_arr[nr])
-                        if ki < 2:   # same lane (lead / rear)
-                            if (nb_lco < -1.0 and nb_lat_v > 0.0) or \
-                               (nb_lco >  1.0 and nb_lat_v < 0.0):
-                                lc_state = 0.0
-                            elif (nb_lco < -1.0 and nb_lat_v < 0.0) or \
-                                 (nb_lco >  1.0 and nb_lat_v > 0.0) or \
-                                 abs(nb_lat_v) > 0.029:
-                                lc_state = 2.0
-                            else:
-                                lc_state = 1.0
-                        elif ki < 5:  # left lane (slots 2,3,4)
-                            if   nb_lat_v < -0.029: lc_state = 0.0
-                            elif nb_lat_v >  0.029: lc_state = 2.0
-                            else:                   lc_state = 1.0
-                        else:         # right lane (slots 5,6,7)
-                            if   nb_lat_v < -0.029: lc_state = 2.0
-                            elif nb_lat_v >  0.029: lc_state = 0.0
-                            else:                   lc_state = 1.0
-                    else:  # v4: lco_norm 기반 경계 판단 + slot별 방향 결정
-                        nb_lat_v    = float(yv_arr[nr])
-                        nb_lco      = float(lat_lane_offset_arr[nr])
-                        nb_lw       = float(lat_lane_width_arr[nr])
-                        nb_lco_norm = nb_lco / (nb_lw * 0.5) if nb_lw > 0.5 else 0.0
-                        if abs(nb_lco_norm) <= 0.5:
-                            lc_state = 1.0
-                        elif ki < 2:   # same lane
-                            lc_state = 0.0 if nb_lco_norm * nb_lat_v < 0 else 2.0
-                        elif ki < 5:   # left lane (slots 2,3,4)
-                            lc_state = 0.0 if nb_lat_v < 0 else 2.0
-                        else:          # right lane (slots 5,6,7)
-                            lc_state = 0.0 if nb_lat_v > 0 else 2.0
+                    # ── lc_state v4: lco_norm 기반 경계 판단 + slot별 방향 결정
+                    # lc_state itself is only used to derive s_y; it is not stored.
+                    nb_lat_v    = float(yv_arr[nr])
+                    nb_lco      = float(lat_lane_offset_arr[nr])
+                    nb_lw       = float(lat_lane_width_arr[nr])
+                    nb_lco_norm = nb_lco / (nb_lw * 0.5) if nb_lw > 0.5 else 0.0
+                    if abs(nb_lco_norm) <= 0.5:
+                        lc_state = 1.0
+                    elif ki < 2:   # same lane
+                        lc_state = 0.0 if nb_lco_norm * nb_lat_v < 0 else 2.0
+                    elif ki < 5:   # left lane (slots 2,3,4)
+                        lc_state = 0.0 if nb_lat_v < 0 else 2.0
+                    else:          # right lane (slots 5,6,7)
+                        lc_state = 0.0 if nb_lat_v > 0 else 2.0
 
                     # ── LIT: gap-based (bumper-to-bumper) ─────────────────────
                     len_nb   = float(vid_to_w.get(nid, 0.0))
@@ -572,21 +496,24 @@ def process_recording(rec_id, raw_dir, args):
                     else:        # nb behind: gap = x_rear_ego - x_front_nb
                         gap        = abs(-dx - half_sum)
                         denom_base = -dvx
-                    lit = gap / (denom_base + (args.eps_gate if denom_base >= 0 else -args.eps_gate))
-                    lis = _lit_to_lis(lit, args.lis_mode)
+                    denom = denom_base
+                    if abs(denom) < 1e-6:
+                        denom = 1e-6 if denom >= 0 else -1e-6
+                    lit = gap / denom
+                    s_x = _lit_to_lis(lit, args.lis_mode)
 
                     nb_class  = vid_to_class.get(nid, "Car")
                     nb_phys_l = vid_to_w.get(nid, 0.0)   # CSV width = physical length
                     nb_phys_w = vid_to_h.get(nid, 0.0)   # CSV height = physical width
-                    size_bin, nb_volume = _volume_bin(nb_phys_l, nb_phys_w, nb_class)
+                    size_bin, _ = _volume_bin(nb_phys_l, nb_phys_w, nb_class)
 
                     delta_lane = float(abs(int(lane_arr[nr]) - int(ego_lanes[ti])))
+                    s_y = float(np.sqrt(lc_state ** 2 + delta_lane ** 2))
 
                     # ── importance ────────────────────────────────────────────
-                    if args.importance_mode == 'lit':
-                        ix, iy, i_total = compute_importance_lit(lit, delta_lane, lc_state)
-                    else:  # 'lis' (default)
-                        ix, iy, i_total = compute_importance_lis(lis, delta_lane, lc_state)
+                    i_total = compute_importance(
+                        s_x, s_y, args.lambda_x, args.lambda_y, args.alpha, args.beta
+                    )
 
                     # ── slot importance boost: I_new = min(I * (1 + alpha * w_slot), 1.0) ──
                     if args.slot_importance_alpha > 0.0:
@@ -599,12 +526,8 @@ def process_recording(rec_id, raw_dir, args):
                             1.0,
                         )
 
-                    # ── gate ──────────────────────────────────────────────────
-                    gate    = 1.0 if (args.gate_theta <= 0.0 or i_total >= args.gate_theta) else 0.0
-
                     nb_all_feats[ki, ti] = [dx, dy, dvx, dvy, dax, day,
-                                            lc_state, nb_volume, size_bin, gate,
-                                            ix * gate, iy * gate, i_total * gate]
+                                            s_x, s_y, size_bin, i_total]
                     nb_mask_mat[ki, ti]  = True
 
                 # Apply gate_topn per timestep after all slots are filled
@@ -637,31 +560,21 @@ def main():
     parser.add_argument("--raw_dir",         type=str,   default="highD/raw")
     parser.add_argument("--out_dir",         type=str,   default="highD")
     parser.add_argument("--feature_mode",    type=str,   default="baseline",
-                        choices=['baseline', 'importance', 'sy', 'iy', 'dimI'])
+                        choices=list(EXTRA_FEATURE_MAP.keys()))
     parser.add_argument("--normalize_flip",  action="store_true", default=True)
     parser.add_argument("--seed",            type=int,   default=42)
-    parser.add_argument("--eps_gate",        type=float, default=1.0,
-                        help="eps for LIT denominator (makes gap dominant over dvx)")
-    parser.add_argument("--gate_theta",      type=float, default=0.0,
-                        help="importance threshold for gate (0.0 = disabled)")
     parser.add_argument("--gate_topn",            type=int,   default=0,
                         help="keep top-N neighbors by I per timestep (0 = disabled)")
     parser.add_argument("--slot_importance_alpha", type=float, default=0.0,
                         help="slot importance boost: I_new = min(I*(1+alpha*w_slot),1.0) (0.0 = disabled)")
     parser.add_argument("--slot_importance_conditional", action="store_true", default=False,
                         help="use lane-level/pre-LC/post-LC conditional slot weights")
-    parser.add_argument("--lc_version",      type=str,   default="v3",
-                        choices=["v1", "v2", "v3", "v4"])
     parser.add_argument("--lis_mode",        type=str,   default="3",
                         choices=list(LIS_BINS.keys()))
-    parser.add_argument("--importance_mode", type=str,   default="lis",
-                        choices=["lis", "lit"])
-    # v1 lc_state params
-    parser.add_argument("--vy_eps",          type=float, default=0.27)
-    # v2 lc_state params
-    parser.add_argument("--dvy_eps_cross",   type=float, default=0.26)
-    parser.add_argument("--dvy_eps_same",    type=float, default=1.03)
-    parser.add_argument("--dy_same",         type=float, default=1.5)
+    parser.add_argument("--lambda_x",        type=float, default=0.1)
+    parser.add_argument("--lambda_y",        type=float, default=0.1)
+    parser.add_argument("--alpha",           type=float, default=1.5)
+    parser.add_argument("--beta",            type=float, default=2.0)
     args = parser.parse_args()
 
     raw_path = Path(args.raw_dir)
@@ -673,10 +586,10 @@ def main():
     num_c       = get_num_channels(args.feature_mode)
     print(f"Found {len(rec_ids)} recordings")
     print(f"Feature mode     : {args.feature_mode}")
-    print(f"lc_version       : {args.lc_version}")
-    print(f"importance_mode  : {args.importance_mode}"
-          + (f"  lis_mode={args.lis_mode}" if args.importance_mode == 'lis' else ""))
-    print(f"gate_theta={args.gate_theta}  gate_topn={args.gate_topn}")
+    print(f"lis_mode         : {args.lis_mode}")
+    print(f"importance       : lambda_x={args.lambda_x}  lambda_y={args.lambda_y}  "
+          f"alpha={args.alpha}  beta={args.beta}")
+    print(f"gate_topn={args.gate_topn}")
     print(f"Target Hz        : {TARGET_HZ}  |  T_H={T_H}  |  T_F={T_F}")
     print(f"Channel layout   : [ego_vx, ego_vy | {nb_feat_dim} nb_feats | is_ego]  ->  total {num_c}ch")
     print(f"Using {cpu_count()} CPU cores")

@@ -1,4 +1,3 @@
-import os
 import bisect
 import math
 import pandas as pd
@@ -7,7 +6,7 @@ import h5py
 import argparse
 from pathlib import Path
 from tqdm import tqdm
-from multiprocessing import Pool, cpu_count
+from multiprocessing import get_context, cpu_count
 
 # ==============================================================================
 # Constants
@@ -673,6 +672,11 @@ def main():
     parser.add_argument("--lambda_y",        type=float, default=0.1)
     parser.add_argument("--alpha",           type=float, default=1.5)
     parser.add_argument("--beta",            type=float, default=2.0)
+    parser.add_argument("--num_workers", "--num-workers",
+                        type=int, default=0,
+                        help="Number of preprocessing worker processes. 0 uses all available CPUs.")
+    parser.add_argument("--chunksize", type=int, default=1,
+                        help="Number of recordings assigned to each worker task chunk.")
     args = parser.parse_args()
     if args.keep_vru:
         args.drop_vru = False
@@ -694,16 +698,24 @@ def main():
     print(f"gate_topn={args.gate_topn}")
     print(f"Target Hz        : {TARGET_HZ}  |  T_H={T_H}  |  T_F={T_F}")
     print(f"Channel layout   : [ego_vx, ego_vy | {nb_feat_dim} nb_feats | is_ego]  ->  total {num_c}ch")
-    print(f"Using {cpu_count()} CPU cores")
+    n_workers = args.num_workers if args.num_workers > 0 else cpu_count()
+    n_workers = max(1, min(n_workers, len(rec_ids))) if rec_ids else 1
+    chunksize = max(1, args.chunksize)
+    print(f"Workers          : {n_workers} / {cpu_count()} CPU cores  |  chunksize={chunksize}")
 
-    with Pool(processes=cpu_count()) as pool:
-        results = list(tqdm(
-            pool.imap(process_wrapper,
-                      [(rid, raw_path, args) for rid in rec_ids]),
-            total=len(rec_ids),
-            desc="Preprocessing"
-        ))
+    tasks = [(rid, raw_path, args) for rid in rec_ids]
+    if n_workers == 1:
+        results = [process_wrapper(task) for task in tqdm(tasks, total=len(tasks), desc="Preprocessing")]
+    else:
+        ctx = get_context("fork")
+        with ctx.Pool(processes=n_workers, maxtasksperchild=1) as pool:
+            results = list(tqdm(
+                pool.imap_unordered(process_wrapper, tasks, chunksize=chunksize),
+                total=len(tasks),
+                desc="Preprocessing"
+            ))
 
+    results.sort(key=lambda item: int(item[0]) if str(item[0]).isdigit() else str(item[0]))
     all_rec_samples = {rid: s for rid, s in results if s}
 
     rec_counts = {rid: len(s) for rid, s in all_rec_samples.items()}

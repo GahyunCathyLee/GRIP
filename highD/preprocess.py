@@ -18,6 +18,7 @@ STRIDE_SEC    = 1.0
 MAX_NEIGHBORS = 8
 NB_DIM        = 10   # dx, dy, dvx, dvy, dax, day, s_x, s_y, dim, I
 LIT_DENOM_EPS = 0.3
+LEGACY_IY_DIM = 11
 
 NEIGHBOR_COLS_8 = [
     "precedingId", "followingId",
@@ -212,9 +213,20 @@ def compute_importance(s_x, s_y, lambda_x, lambda_y, alpha, beta):
     return float(np.exp(-lambda_x * (abs(s_x) ** alpha) - lambda_y * (s_y ** beta)))
 
 
+def compute_legacy_iy(lis, delta_lane, lc_state):
+    """Legacy I_y used by the old dimI mode."""
+    sy, ay, by, py = 2.0, 0.1, 0.1, 1.5
+    return float(
+        np.exp(-(lc_state ** 2) / (2.0 * sy ** 2))
+        * np.exp(-ay * (abs(lis) ** py))
+        * np.exp(-by * delta_lane)
+    )
+
+
 # ==============================================================================
 # Feature mode index map
 # NB_DIM=10: [0]dx [1]dy [2]dvx [3]dvy [4]dax [5]day [6]s_x [7]s_y [8]dim [9]I
+# legacy_dimI uses an extended scratch feature at [10]=legacy I_y.
 # ==============================================================================
 EXTRA_FEATURE_MAP = {
     'baseline':   [0, 1, 2, 3, 4, 5],        # dx, dy, dvx, dvy, dax, day
@@ -222,6 +234,7 @@ EXTRA_FEATURE_MAP = {
     'sy':         [0, 1, 2, 3, 4, 5, 7],     # dx, dy, dvx, dvy, dax, day, s_y
     'iy':         [0, 1, 2, 3, 4, 5, 9],     # legacy alias: I
     'dimI':       [0, 1, 2, 3, 4, 5, 8, 9],  # dx, dy, dvx, dvy, dax, day, dim, I
+    'legacy_dimI': [0, 1, 2, 3, 4, 5, 8, 10], # dx, dy, dvx, dvy, dax, day, dim, legacy I_y
     'dim':        [0, 1, 2, 3, 4, 5, 8],
 }
 
@@ -458,8 +471,8 @@ def process_recording(rec_id, raw_dir, args):
                 if any(r is None for r in nb_rows_ki): continue
                 valid_nbs[ki] = (nid, nb_rows_ki)
 
-            # All-neighbor feature matrix: (MAX_NEIGHBORS, T_H, NB_DIM)
-            nb_all_feats = np.zeros((MAX_NEIGHBORS, T_H, NB_DIM), np.float32)
+            # All-neighbor feature matrix: base 10 dims + optional legacy I_y scratch dim.
+            nb_all_feats = np.zeros((MAX_NEIGHBORS, T_H, LEGACY_IY_DIM), np.float32)
             nb_mask_mat  = np.zeros((MAX_NEIGHBORS, T_H), bool)
 
             for ti, hf in enumerate(hist_frames):
@@ -513,6 +526,7 @@ def process_recording(rec_id, raw_dir, args):
                     i_total = compute_importance(
                         s_x, s_y, args.lambda_x, args.lambda_y, args.alpha, args.beta
                     )
+                    legacy_iy = compute_legacy_iy(s_x, delta_lane, lc_state)
 
                     # ── slot importance boost: I_new = min(I * (1 + alpha * w_slot), 1.0) ──
                     if args.slot_importance_alpha > 0.0:
@@ -526,7 +540,8 @@ def process_recording(rec_id, raw_dir, args):
                         )
 
                     nb_all_feats[ki, ti] = [dx, dy, dvx, dvy, dax, day,
-                                            s_x, s_y, size_bin, i_total]
+                                            s_x, s_y, size_bin, i_total,
+                                            legacy_iy]
                     nb_mask_mat[ki, ti]  = True
 
                 # Apply gate_topn per timestep after all slots are filled

@@ -17,6 +17,7 @@ T_F           = 15   # 5 sec * 3 Hz (future)
 STRIDE_SEC    = 1.0
 MAX_NEIGHBORS = 8
 NB_DIM        = 10   # dx, dy, dvx, dvy, dax, day, s_x, s_y, dim, I
+LIT_DENOM_EPS = 0.3
 
 NEIGHBOR_COLS_8 = [
     "precedingId", "followingId",
@@ -496,9 +497,7 @@ def process_recording(rec_id, raw_dir, args):
                     else:        # nb behind: gap = x_rear_ego - x_front_nb
                         gap        = abs(-dx - half_sum)
                         denom_base = -dvx
-                    denom = denom_base
-                    if abs(denom) < 1e-6:
-                        denom = 1e-6 if denom >= 0 else -1e-6
+                    denom = denom_base + (LIT_DENOM_EPS if denom_base >= 0 else -LIT_DENOM_EPS)
                     lit = gap / denom
                     s_x = _lit_to_lis(lit, args.lis_mode)
 

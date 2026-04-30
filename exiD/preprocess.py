@@ -18,6 +18,7 @@ T_F           = 15   # 5 sec * 3 Hz (future)
 STRIDE_SEC    = 1.0
 MAX_NEIGHBORS = 8
 NB_DIM        = 10   # dx, dy, dvx, dvy, dax, day, s_x, s_y, dim, I
+LIT_DENOM_EPS = 0.3
 
 NEIGHBOR_COLS_8 = [
     "leadId", "rearId",
@@ -549,18 +550,18 @@ def process_recording(rec_id, raw_dir, args):
 
                     # ── lc_state v4: lco_norm 기반 경계 판단 + slot별 방향 결정
                     # lc_state itself is only used to derive s_y; it is not stored.
-                        nb_lat_v    = float(lat_lc_v_arr[nr])
-                        nb_lco      = float(lat_lane_offset_arr[nr])
-                        nb_lw       = float(lat_lane_width_arr[nr])
-                        nb_lco_norm = nb_lco / (nb_lw * 0.5) if nb_lw > 0.5 else 0.0
-                        if abs(nb_lco_norm) <= 0.5:
-                            lc_state = 1.0
-                        elif ki < 2:   # same lane
-                            lc_state = 0.0 if nb_lco_norm * nb_lat_v < 0 else 2.0
-                        elif ki < 5:   # left lane (slots 2,3,4)
-                            lc_state = 0.0 if nb_lat_v < 0 else 2.0
-                        else:          # right lane (slots 5,6,7)
-                            lc_state = 0.0 if nb_lat_v > 0 else 2.0
+                    nb_lat_v    = float(lat_lc_v_arr[nr])
+                    nb_lco      = float(lat_lane_offset_arr[nr])
+                    nb_lw       = float(lat_lane_width_arr[nr])
+                    nb_lco_norm = nb_lco / (nb_lw * 0.5) if nb_lw > 0.5 else 0.0
+                    if abs(nb_lco_norm) <= 0.5:
+                        lc_state = 1.0
+                    elif ki < 2:   # same lane
+                        lc_state = 0.0 if nb_lco_norm * nb_lat_v < 0 else 2.0
+                    elif ki < 5:   # left lane (slots 2,3,4)
+                        lc_state = 0.0 if nb_lat_v < 0 else 2.0
+                    else:          # right lane (slots 5,6,7)
+                        lc_state = 0.0 if nb_lat_v > 0 else 2.0
 
                     # ── LIT: gap-based (bumper-to-bumper) ─────────────────────
                     len_nb   = float(vid_to_w.get(nid, 0.0))
@@ -571,9 +572,7 @@ def process_recording(rec_id, raw_dir, args):
                     else:        # nb behind: gap = x_rear_ego - x_front_nb
                         gap        = abs(-dx - half_sum)
                         denom_base = -dvx
-                    denom = denom_base
-                    if abs(denom) < 1e-6:
-                        denom = 1e-6 if denom >= 0 else -1e-6
+                    denom = denom_base + (LIT_DENOM_EPS if denom_base >= 0 else -LIT_DENOM_EPS)
                     lit = gap / denom
                     s_x = _lit_to_lis(lit, args.lis_mode)
 

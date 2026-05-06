@@ -586,7 +586,7 @@ def plot_scene(
         ) from exc
 
     n_plots = max(1, len(preds))
-    fig, axes = plt.subplots(n_plots, 1, figsize=(14, 7 * n_plots), squeeze=False)
+    fig, axes = plt.subplots(n_plots, 1, figsize=(8.2, 3.6 * n_plots), squeeze=False)
     axes_list = list(axes[:, 0])
     history = geom["history"]
     future = geom["future"]
@@ -668,9 +668,9 @@ def plot_scene(
         ax.set_title(f"{title} | {label}")
         if show_legend:
             ax.legend(loc="best")
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.08, right=0.995, bottom=0.055, top=0.94, hspace=0.08)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=180)
+    fig.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0.03)
     print(f"saved: {out_path}", flush=True)
     if show:
         plt.show()

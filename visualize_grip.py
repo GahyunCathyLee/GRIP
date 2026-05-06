@@ -103,8 +103,8 @@ def infer_dataset(cfg: Dict[str, Any], explicit: Optional[str]) -> str:
 
 def default_raw_dir(dataset: str) -> Path:
     if dataset == "exiD":
-        return Path("../neighformer/data/exiD/raw")
-    return Path("../neighformer/data/highD/raw")
+        return Path("exiD/raw")
+    return Path("highD/raw")
 
 
 def default_h5_path(cfg: Dict[str, Any], feature_mode: str, split: str) -> Path:
@@ -196,6 +196,7 @@ def find_sample_index(
     labels: Optional[pd.DataFrame],
     event: Optional[str],
     state: Optional[str],
+    scenario_rank: int,
 ) -> Tuple[int, str]:
     rids = h5["meta_recordingId"].astype(int)
     tids = h5["meta_trackId"].astype(int)
@@ -233,10 +234,23 @@ def find_sample_index(
             (int(r), int(t), int(f)): i
             for i, (r, t, f) in enumerate(zip(rids, tids, t0s))
         }
+        matches: List[Tuple[int, Tuple[int, int, int]]] = []
         for row in df.itertuples(index=False):
             key = (int(row.recordingId), int(row.trackId), int(row.t0_frame))
             if key in key_to_idx:
-                return int(key_to_idx[key]), f"scenario match {key}"
+                matches.append((int(key_to_idx[key]), key))
+        if matches:
+            if scenario_rank < 0 or scenario_rank >= len(matches):
+                preview = "\n  ".join(
+                    f"rank={rank} idx={idx} rec={key[0]} track={key[1]} t0={key[2]}"
+                    for rank, (idx, key) in enumerate(matches[:10])
+                )
+                raise ValueError(
+                    f"--scenario_rank={scenario_rank} is out of range for this filter "
+                    f"({len(matches)} matches). First matches:\n  {preview}"
+                )
+            idx, key = matches[scenario_rank]
+            return idx, f"scenario rank={scenario_rank}/{len(matches)} match {key}"
 
     if len(exact) > 0:
         return int(exact[0]), "meta match; scenario filter had no matching label"
@@ -358,6 +372,8 @@ def get_sample_geometry(scene: RawScene, track_id: int, t0_frame: int) -> Dict[s
     step = max(1, int(round(scene.frame_rate / TARGET_HZ)))
     hist_frames = [t0_frame - (T_H - 1 - i) * step for i in range(T_H)]
     fut_frames = [t0_frame + (i + 1) * step for i in range(T_F)]
+    all_frames = hist_frames + fut_frames
+    hist_frame_set = set(hist_frames)
     ego_rows = [by_tf[track_id].get(f) for f in hist_frames]
     fut_rows = [by_tf[track_id].get(f) for f in fut_frames]
     if any(r is None for r in ego_rows) or any(r is None for r in fut_rows):
@@ -378,16 +394,22 @@ def get_sample_geometry(scene: RawScene, track_id: int, t0_frame: int) -> Dict[s
     for slot, nid in enumerate(obs_ids):
         if nid <= 0 or nid not in by_tf:
             continue
-        nb_rows = [by_tf[nid].get(f) for f in hist_frames]
-        if any(r is None for r in nb_rows):
+        nb_items = [(frame, by_tf[nid].get(frame)) for frame in all_frames]
+        nb_items = [(frame, row) for frame, row in nb_items if row is not None]
+        if not nb_items:
             continue
+        nb_frames = [frame for frame, _ in nb_items]
+        nb_rows = [row for _, row in nb_items]
         xy = np.array([row_xy(r, scene) for r in nb_rows], dtype=np.float32)
         headings = np.array([row_heading(r, scene) for r in nb_rows], dtype=np.float32)
-        n0 = nb_rows[-1]
+        is_history = np.array([frame in hist_frame_set for frame in nb_frames], dtype=bool)
+        n0 = nb_rows[min(len(nb_rows) - 1, max(0, int(np.sum(is_history)) - 1))]
         neighbors.append({
             "slot": slot,
             "slot_name": SLOT_NAMES[slot],
             "track_id": nid,
+            "frames": nb_frames,
+            "is_history": is_history,
             "xy": xy,
             "heading": headings,
             "length": float(getattr(n0, "length", 4.8)),
@@ -420,6 +442,19 @@ def predict_one(model: Model, h5: Dict[str, Any], idx: int, cfg: Dict[str, Any],
         out = model(x.to(device), adj_t.to(device), pred_len)
     pred = out[:, :, :, 0].permute(0, 2, 1)[0].detach().cpu().numpy()
     return pred
+
+
+def trajectory_metrics(pred: np.ndarray, target: np.ndarray) -> Dict[str, float]:
+    n = min(len(pred), len(target))
+    if n == 0:
+        return {"ADE": float("nan"), "FDE": float("nan"), "RMSE": float("nan")}
+    diff = pred[:n] - target[:n]
+    dist = np.linalg.norm(diff, axis=1)
+    return {
+        "ADE": float(np.mean(dist)),
+        "FDE": float(dist[-1]),
+        "RMSE": float(np.sqrt(np.mean(dist ** 2))),
+    }
 
 
 def parse_lanelet_osm(osm_path: Path, recmeta: pd.DataFrame) -> List[np.ndarray]:
@@ -526,6 +561,7 @@ def plot_scene(
     lanelet_root: Path,
     show: bool,
     invert_y: bool,
+    show_legend: bool,
 ) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -569,14 +605,26 @@ def plot_scene(
     cmap = plt.get_cmap("tab10")
     for nb_i, nb in enumerate(geom["neighbors"]):
         color = cmap((nb_i + 3) % 10)
-        ax.plot(nb["xy"][:, 0], nb["xy"][:, 1], color=color, linewidth=1.0, alpha=0.45)
+        hist_xy = nb["xy"][nb["is_history"]]
+        fut_xy = nb["xy"][~nb["is_history"]]
+        ax.plot(nb["xy"][:, 0], nb["xy"][:, 1], color=color, linewidth=1.0, alpha=0.5, zorder=2)
+        if len(hist_xy) > 0:
+            ax.scatter(hist_xy[:, 0], hist_xy[:, 1], color=color, s=12, alpha=0.65, zorder=3)
+        if len(fut_xy) > 0:
+            ax.scatter(fut_xy[:, 0], fut_xy[:, 1], color=color, s=12, marker="x", alpha=0.55, zorder=3)
         for ti, xy in enumerate(nb["xy"]):
-            alpha = 0.18 + 0.07 * ti
+            alpha = 0.45 if bool(nb["is_history"][ti]) else 0.18
             draw_rotated_box(
                 ax, xy, nb["length"], nb["width"], float(nb["heading"][ti]),
-                edgecolor=color, linewidth=0.8, alpha=min(alpha, 0.7), zorder=2,
+                edgecolor=color, linewidth=0.8, alpha=alpha, zorder=2,
             )
-        ax.text(nb["xy"][-1, 0], nb["xy"][-1, 1], f"{nb['slot']}:{nb['track_id']}", fontsize=8, color=color)
+        ax.text(
+            nb["xy"][-1, 0],
+            nb["xy"][-1, 1],
+            f"{nb['slot_name']}:{nb['track_id']}",
+            fontsize=8,
+            color=color,
+        )
 
     ax.plot(gt_full[:, 0], gt_full[:, 1], color="0.2", linewidth=2.0, marker="o", markersize=3, label="GT hist+future", zorder=5)
     ax.scatter(history[-1, 0], history[-1, 1], color="black", s=45, marker="x", label="t0", zorder=7)
@@ -599,7 +647,8 @@ def plot_scene(
     ax.set_xlabel("x relative to ego t0 (m)")
     ax.set_ylabel("y relative to ego t0 (m)")
     ax.set_title(title)
-    ax.legend(loc="best")
+    if show_legend:
+        ax.legend(loc="best")
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=180)
@@ -624,9 +673,11 @@ def main() -> None:
     ap.add_argument("--trackId", type=int, default=None)
     ap.add_argument("--t0_frame", type=int, default=None)
     ap.add_argument("--idx", type=int, default=None, help="direct h5 sample index")
+    ap.add_argument("--scenario_rank", type=int, default=0, help="nth sample among matches for --event/--state filters")
     ap.add_argument("--out", default="vis_grip")
     ap.add_argument("--lanelet_root", default="exiD/lanelet2")
     ap.add_argument("--show", action="store_true")
+    ap.add_argument("--show_legend", action="store_true")
     ap.add_argument("--no_invert_y", action="store_true")
     ap.add_argument("--cpu", action="store_true")
     args = ap.parse_args()
@@ -667,6 +718,7 @@ def main() -> None:
             labels=labels,
             event=args.event,
             state=args.state,
+            scenario_rank=args.scenario_rank,
         )
 
     rec_id = int(h5["meta_recordingId"][idx])
@@ -679,6 +731,7 @@ def main() -> None:
     geom = get_sample_geometry(scene, track_id, t0_frame)
 
     preds: List[Tuple[str, np.ndarray]] = []
+    metric_rows: List[Tuple[str, Dict[str, float]]] = []
     feature_modes = {fm for _, _, fm in models}
     if len(feature_modes) != 1:
         raise ValueError(
@@ -687,12 +740,21 @@ def main() -> None:
         )
     for label, m, _ in models:
         pred = predict_one(m, h5, idx, cfg, device)
-        preds.append((f"Pred {label}", pred))
+        plot_label = f"Pred {label}"
+        metrics = trajectory_metrics(pred, geom["future"])
+        preds.append((plot_label, pred))
+        metric_rows.append((label, metrics))
 
-    title = (
-        f"{dataset} {reason} | idx={idx} rec={rec_id:02d} track={track_id} t0={t0_frame} "
-        f"| feature={feature_mode}"
-    )
+    if len(metric_rows) == 1:
+        m = metric_rows[0][1]
+        metrics_text = f"ADE={m['ADE']:.3f} FDE={m['FDE']:.3f} RMSE={m['RMSE']:.3f}"
+    else:
+        metrics_text = " | ".join(
+            f"ADE={m['ADE']:.3f} FDE={m['FDE']:.3f} RMSE={m['RMSE']:.3f}"
+            for _, m in metric_rows
+        )
+    title = f"{dataset} | rec={rec_id:02d} track={track_id} t0={t0_frame} feature={feature_mode}\n{metrics_text}"
+    print(title.replace("\n", " | "))
     out_name = f"{dataset}_rec{rec_id:02d}_track{track_id}_t0{t0_frame}_{'-vs-'.join(p[0].replace('Pred ', '') for p in preds)}.png"
     plot_scene(
         scene,
@@ -703,6 +765,7 @@ def main() -> None:
         lanelet_root=Path(args.lanelet_root),
         show=args.show,
         invert_y=not args.no_invert_y,
+        show_legend=args.show_legend,
     )
 
 

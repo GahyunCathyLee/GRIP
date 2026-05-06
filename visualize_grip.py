@@ -671,12 +671,12 @@ def plot_scene(
             ax.invert_yaxis()
         ax.grid(True, alpha=0.2)
         if pi == n_plots - 1:
-            ax.set_xlabel("x relative to ego t0 (m)", fontsize=7, labelpad=1)
+            ax.set_xlabel("x (m)", fontsize=7, labelpad=1)
         else:
             ax.set_xlabel("")
-        ax.set_ylabel("y relative to ego t0 (m)", fontsize=7, labelpad=1)
+        ax.set_ylabel("y (m)", fontsize=7, labelpad=1)
         ax.tick_params(axis="both", labelsize=6, pad=1)
-        ax.set_title(f"{title} | {label}", fontsize=7, pad=1.5)
+        ax.set_title(f"{title} | {label}", fontsize=10, pad=1.5)
         if show_legend:
             ax.legend(loc="best")
     fig.subplots_adjust(left=0.075, right=0.995, bottom=0.10, top=0.93, hspace=0.12)

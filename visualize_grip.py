@@ -585,7 +585,9 @@ def plot_scene(
             "used for plotting, or install matplotlib there."
         ) from exc
 
-    fig, ax = plt.subplots(figsize=(14, 7))
+    n_plots = max(1, len(preds))
+    fig, axes = plt.subplots(n_plots, 1, figsize=(14, 7 * n_plots), squeeze=False)
+    axes_list = list(axes[:, 0])
     history = geom["history"]
     future = geom["future"]
     gt_full = np.vstack([history, future])
@@ -598,74 +600,78 @@ def plot_scene(
     xmax, ymax = np.nanmax(pts_all, axis=0)
     padx = max(8.0, 0.12 * (xmax - xmin + 1e-6))
     pady = max(8.0, 0.20 * (ymax - ymin + 1e-6))
-    ax.set_xlim(xmin - padx, xmax + padx)
-    ax.set_ylim(ymin - pady, ymax + pady)
 
+    raw_map_lines: List[np.ndarray] = []
     if scene.dataset == "exiD":
         osm = exid_osm_path(lanelet_root, scene.recmeta)
         if osm is not None:
-            raw_lines = parse_lanelet_osm(osm, scene.recmeta)
-            for line in transform_map_lines(raw_lines, scene):
+            raw_map_lines = transform_map_lines(parse_lanelet_osm(osm, scene.recmeta), scene)
+
+    cmap = plt.get_cmap("tab10")
+    pred_colors = ["tab:blue", "tab:red"]
+    for pi, ((label, pred), ax) in enumerate(zip(preds, axes_list)):
+        ax.set_xlim(xmin - padx, xmax + padx)
+        ax.set_ylim(ymin - pady, ymax + pady)
+
+        if scene.dataset == "exiD":
+            for line in raw_map_lines:
                 if len(line) and not (
                     line[:, 0].max() < xmin - 2 * padx or line[:, 0].min() > xmax + 2 * padx
                     or line[:, 1].max() < ymin - 2 * pady or line[:, 1].min() > ymax + 2 * pady
                 ):
                     ax.plot(line[:, 0], line[:, 1], color="0.75", linewidth=0.8, alpha=0.8, zorder=0)
-    else:
-        draw_highd_lanes(ax, scene, ax.get_xlim())
+        else:
+            draw_highd_lanes(ax, scene, ax.get_xlim())
 
-    cmap = plt.get_cmap("tab10")
-    for nb_i, nb in enumerate(geom["neighbors"]):
-        color = cmap((nb_i + 3) % 10)
-        hist_xy = nb["xy"][nb["is_history"]]
-        fut_xy = nb["xy"][~nb["is_history"]]
-        ax.plot(nb["xy"][:, 0], nb["xy"][:, 1], color=color, linewidth=1.0, alpha=0.5, zorder=2)
-        if len(hist_xy) > 0:
-            ax.scatter(hist_xy[:, 0], hist_xy[:, 1], color=color, s=12, alpha=0.65, zorder=3)
-        if len(fut_xy) > 0:
-            ax.scatter(fut_xy[:, 0], fut_xy[:, 1], color=color, s=12, marker="x", alpha=0.55, zorder=3)
-        for ti, xy in enumerate(nb["xy"]):
-            alpha = 0.45 if bool(nb["is_history"][ti]) else 0.18
+        for nb_i, nb in enumerate(geom["neighbors"]):
+            color = cmap((nb_i + 3) % 10)
+            hist_xy = nb["xy"][nb["is_history"]]
+            fut_xy = nb["xy"][~nb["is_history"]]
+            ax.plot(nb["xy"][:, 0], nb["xy"][:, 1], color=color, linewidth=1.0, alpha=0.5, zorder=2)
+            if len(hist_xy) > 0:
+                ax.scatter(hist_xy[:, 0], hist_xy[:, 1], color=color, s=12, alpha=0.65, zorder=3)
+            if len(fut_xy) > 0:
+                ax.scatter(fut_xy[:, 0], fut_xy[:, 1], color=color, s=12, marker="x", alpha=0.55, zorder=3)
+            for ti, xy in enumerate(nb["xy"]):
+                alpha = 0.45 if bool(nb["is_history"][ti]) else 0.18
+                draw_rotated_box(
+                    ax, xy, nb["length"], nb["width"], float(nb["heading"][ti]),
+                    edgecolor=color, linewidth=0.8, alpha=alpha, zorder=2,
+                )
+            if show_neighbor_labels:
+                ax.text(
+                    nb["xy"][-1, 0],
+                    nb["xy"][-1, 1],
+                    f"{nb['slot_name']}:{nb['track_id']}",
+                    fontsize=8,
+                    color=color,
+                )
+
+        ax.plot(gt_full[:, 0], gt_full[:, 1], color="0.2", linewidth=2.0, marker="o", markersize=3, label="GT hist+future", zorder=5)
+        ax.scatter(history[-1, 0], history[-1, 1], color="black", s=45, marker="x", label="t0", zorder=7)
+        for ti, xy in enumerate(history):
             draw_rotated_box(
-                ax, xy, nb["length"], nb["width"], float(nb["heading"][ti]),
-                edgecolor=color, linewidth=0.8, alpha=alpha, zorder=2,
-            )
-        if show_neighbor_labels:
-            ax.text(
-                nb["xy"][-1, 0],
-                nb["xy"][-1, 1],
-                f"{nb['slot_name']}:{nb['track_id']}",
-                fontsize=8,
-                color=color,
+                ax, xy, geom["ego_size"][0], geom["ego_size"][1], float(geom["ego_heading"][ti]),
+                edgecolor="black", linewidth=1.0, alpha=0.25 + 0.08 * ti, zorder=4,
             )
 
-    ax.plot(gt_full[:, 0], gt_full[:, 1], color="0.2", linewidth=2.0, marker="o", markersize=3, label="GT hist+future", zorder=5)
-    ax.scatter(history[-1, 0], history[-1, 1], color="black", s=45, marker="x", label="t0", zorder=7)
-    for ti, xy in enumerate(history):
-        draw_rotated_box(
-            ax, xy, geom["ego_size"][0], geom["ego_size"][1], float(geom["ego_heading"][ti]),
-            edgecolor="black", linewidth=1.0, alpha=0.25 + 0.08 * ti, zorder=4,
-        )
+        pred_color = pred_colors[pi % len(pred_colors)]
+        ax.plot(pred[:, 0], pred[:, 1], color=pred_color, linewidth=2.0, marker="o", markersize=3, label=label, zorder=6)
+        ax.scatter(pred[-1, 0], pred[-1, 1], color=pred_color, s=55, marker="x", zorder=7)
 
-    colors = ["tab:blue", "tab:red"]
-    for pi, (label, pred) in enumerate(preds):
-        color = colors[pi % len(colors)]
-        ax.plot(pred[:, 0], pred[:, 1], color=color, linewidth=2.0, marker="o", markersize=3, label=label, zorder=6)
-        ax.scatter(pred[-1, 0], pred[-1, 1], color=color, s=55, marker="x", zorder=7)
-
-    ax.set_aspect("equal", adjustable="box")
-    if invert_y:
-        ax.invert_yaxis()
-    ax.grid(True, alpha=0.2)
-    ax.set_xlabel("x relative to ego t0 (m)")
-    ax.set_ylabel("y relative to ego t0 (m)")
-    ax.set_title(title)
-    if show_legend:
-        ax.legend(loc="best")
+        ax.set_aspect("equal", adjustable="box")
+        if invert_y:
+            ax.invert_yaxis()
+        ax.grid(True, alpha=0.2)
+        ax.set_xlabel("x relative to ego t0 (m)")
+        ax.set_ylabel("y relative to ego t0 (m)")
+        ax.set_title(f"{title} | {label}")
+        if show_legend:
+            ax.legend(loc="best")
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=180)
-    print(f"saved: {out_path}")
+    print(f"saved: {out_path}", flush=True)
     if show:
         plt.show()
     plt.close(fig)
@@ -754,13 +760,14 @@ def main() -> None:
         find_exact_meta_index(h5_other, rec_id, track_id, t0_frame)
         for h5_other in h5s[1:]
     ]
-    print(f"selected sample: ref_idx={idx} rec={rec_id:02d} track={track_id} t0={t0_frame}")
+    print(f"selected sample: ref_idx={idx} rec={rec_id:02d} track={track_id} t0={t0_frame}", flush=True)
     print(
         "model sample indices: "
         + " | ".join(
             f"{feature_mode} idx={sample_idx}"
             for (_, _, feature_mode, _), sample_idx in zip(models, sample_indices)
-        )
+        ),
+        flush=True,
     )
 
     raw_dir = Path(args.raw_dir) if args.raw_dir else default_raw_dir(dataset)
@@ -773,8 +780,11 @@ def main() -> None:
     feature_modes = [fm for _, _, fm, _ in models]
     for (label, m, feature_mode, cfg), h5, sample_idx in zip(models, h5s, sample_indices):
         pred = predict_one(m, h5, sample_idx, cfg, device)
-        plot_label = f"Pred {feature_mode}"
         metrics = trajectory_metrics(pred, geom["future"])
+        plot_label = (
+            f"feature={feature_mode} | "
+            f"ADE={metrics['ADE']:.3f} FDE={metrics['FDE']:.3f} RMSE={metrics['RMSE']:.3f}"
+        )
         preds.append((plot_label, pred))
         metric_rows.append((feature_mode, metrics))
 
@@ -787,9 +797,9 @@ def main() -> None:
             for _, m in metric_rows
         )
     feature_text = "/".join(feature_modes)
-    title = f"{dataset} | rec={rec_id:02d} track={track_id} t0={t0_frame} feature={feature_text} | {metrics_text}"
-    print(title.replace("\n", " | "))
-    out_name = f"{dataset}_rec{rec_id:02d}_track{track_id}_t0{t0_frame}_{'-vs-'.join(p[0].replace('Pred ', '') for p in preds)}.png"
+    title = f"{dataset} | rec={rec_id:02d} track={track_id} t0={t0_frame}"
+    print(f"{title} | feature={feature_text} | {metrics_text}", flush=True)
+    out_name = f"{dataset}_rec{rec_id:02d}_track{track_id}_t0{t0_frame}_{'-vs-'.join(feature_modes)}.png"
     plot_scene(
         scene,
         geom,

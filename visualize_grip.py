@@ -586,7 +586,14 @@ def plot_scene(
         ) from exc
 
     n_plots = max(1, len(preds))
-    fig, axes = plt.subplots(n_plots, 1, figsize=(8.2, 3.6 * n_plots), squeeze=False)
+    fig, axes = plt.subplots(
+        n_plots,
+        1,
+        figsize=(8.2, 1.5 * n_plots),
+        squeeze=False,
+        sharex=True,
+        sharey=True,
+    )
     axes_list = list(axes[:, 0])
     history = geom["history"]
     future = geom["future"]
@@ -663,14 +670,18 @@ def plot_scene(
         if invert_y:
             ax.invert_yaxis()
         ax.grid(True, alpha=0.2)
-        ax.set_xlabel("x relative to ego t0 (m)")
-        ax.set_ylabel("y relative to ego t0 (m)")
-        ax.set_title(f"{title} | {label}")
+        if pi == n_plots - 1:
+            ax.set_xlabel("x relative to ego t0 (m)", fontsize=7, labelpad=1)
+        else:
+            ax.set_xlabel("")
+        ax.set_ylabel("y relative to ego t0 (m)", fontsize=7, labelpad=1)
+        ax.tick_params(axis="both", labelsize=6, pad=1)
+        ax.set_title(f"{title} | {label}", fontsize=7, pad=1.5)
         if show_legend:
             ax.legend(loc="best")
-    fig.subplots_adjust(left=0.08, right=0.995, bottom=0.055, top=0.94, hspace=0.08)
+    fig.subplots_adjust(left=0.075, right=0.995, bottom=0.10, top=0.93, hspace=0.12)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0.03)
+    fig.savefig(out_path, dpi=300)
     print(f"saved: {out_path}", flush=True)
     if show:
         plt.show()

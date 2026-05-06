@@ -562,6 +562,7 @@ def plot_scene(
     show: bool,
     invert_y: bool,
     show_legend: bool,
+    show_neighbor_labels: bool,
 ) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -618,13 +619,14 @@ def plot_scene(
                 ax, xy, nb["length"], nb["width"], float(nb["heading"][ti]),
                 edgecolor=color, linewidth=0.8, alpha=alpha, zorder=2,
             )
-        ax.text(
-            nb["xy"][-1, 0],
-            nb["xy"][-1, 1],
-            f"{nb['slot_name']}:{nb['track_id']}",
-            fontsize=8,
-            color=color,
-        )
+        if show_neighbor_labels:
+            ax.text(
+                nb["xy"][-1, 0],
+                nb["xy"][-1, 1],
+                f"{nb['slot_name']}:{nb['track_id']}",
+                fontsize=8,
+                color=color,
+            )
 
     ax.plot(gt_full[:, 0], gt_full[:, 1], color="0.2", linewidth=2.0, marker="o", markersize=3, label="GT hist+future", zorder=5)
     ax.scatter(history[-1, 0], history[-1, 1], color="black", s=45, marker="x", label="t0", zorder=7)
@@ -678,6 +680,7 @@ def main() -> None:
     ap.add_argument("--lanelet_root", default="exiD/lanelet2")
     ap.add_argument("--show", action="store_true")
     ap.add_argument("--show_legend", action="store_true")
+    ap.add_argument("--show_neighbor_labels", action="store_true")
     ap.add_argument("--no_invert_y", action="store_true")
     ap.add_argument("--cpu", action="store_true")
     args = ap.parse_args()
@@ -753,7 +756,7 @@ def main() -> None:
             f"ADE={m['ADE']:.3f} FDE={m['FDE']:.3f} RMSE={m['RMSE']:.3f}"
             for _, m in metric_rows
         )
-    title = f"{dataset} | rec={rec_id:02d} track={track_id} t0={t0_frame} feature={feature_mode}\n{metrics_text}"
+    title = f"{dataset} | rec={rec_id:02d} track={track_id} t0={t0_frame} feature={feature_mode} | {metrics_text}"
     print(title.replace("\n", " | "))
     out_name = f"{dataset}_rec{rec_id:02d}_track{track_id}_t0{t0_frame}_{'-vs-'.join(p[0].replace('Pred ', '') for p in preds)}.png"
     plot_scene(
@@ -766,6 +769,7 @@ def main() -> None:
         show=args.show,
         invert_y=not args.no_invert_y,
         show_legend=args.show_legend,
+        show_neighbor_labels=args.show_neighbor_labels,
     )
 
 

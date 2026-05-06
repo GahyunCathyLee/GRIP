@@ -267,6 +267,19 @@ def find_sample_index(
     raise ValueError("Requested sample was not found. Try one of:\n  " + "\n  ".join(lines))
 
 
+def find_exact_meta_index(h5: Dict[str, Any], rec_id: int, track_id: int, t0_frame: int) -> int:
+    rids = h5["meta_recordingId"].astype(int)
+    tids = h5["meta_trackId"].astype(int)
+    t0s = h5["meta_t0_frame"].astype(int)
+    idxs = np.where((rids == rec_id) & (tids == track_id) & (t0s == t0_frame))[0]
+    if len(idxs) > 0:
+        return int(idxs[0])
+    raise ValueError(
+        f"Matching sample not found in {h5['path']} for "
+        f"rec={rec_id:02d}, track={track_id}, t0={t0_frame}"
+    )
+
+
 def normalize_highd_scene(rec_id: int, raw_dir: Path) -> RawScene:
     xx = f"{rec_id:02d}"
     tracks = read_csv_smart(raw_dir / f"{xx}_tracks.csv")
@@ -580,13 +593,11 @@ def plot_scene(
     all_pts = [gt_full]
     for _, pred in preds:
         all_pts.append(pred)
-    for nb in geom["neighbors"]:
-        all_pts.append(nb["xy"])
     pts_all = np.vstack(all_pts)
     xmin, ymin = np.nanmin(pts_all, axis=0)
     xmax, ymax = np.nanmax(pts_all, axis=0)
-    padx = max(15.0, 0.15 * (xmax - xmin + 1e-6))
-    pady = max(10.0, 0.25 * (ymax - ymin + 1e-6))
+    padx = max(8.0, 0.12 * (xmax - xmin + 1e-6))
+    pady = max(8.0, 0.20 * (ymax - ymin + 1e-6))
     ax.set_xlim(xmin - padx, xmax + padx)
     ax.set_ylim(ymin - pady, ymax + pady)
 
@@ -662,10 +673,10 @@ def plot_scene(
 
 def main() -> None:
     ap = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    ap.add_argument("--config", required=True)
+    ap.add_argument("--config", nargs="+", required=True, help="one config, or one config per checkpoint")
     ap.add_argument("--ckpt", nargs="+", required=True, help="one or two checkpoint paths")
     ap.add_argument("--dataset", choices=["highD", "exiD"], default=None)
-    ap.add_argument("--h5", default=None, help="h5 split file. Defaults to <base_dir>/<feature_mode>/<split>.h5")
+    ap.add_argument("--h5", nargs="+", default=None, help="one h5, or one h5 per checkpoint")
     ap.add_argument("--split", default="test")
     ap.add_argument("--raw_dir", default=None)
     ap.add_argument("--scenario_labels", default=None)
@@ -687,34 +698,46 @@ def main() -> None:
 
     if len(args.ckpt) not in (1, 2):
         raise ValueError("--ckpt accepts one or two paths")
+    if len(args.config) not in (1, len(args.ckpt)):
+        raise ValueError("--config must be either one config or one config per checkpoint")
+    if args.h5 is not None and len(args.h5) not in (1, len(args.ckpt)):
+        raise ValueError("--h5 must be either one h5 or one h5 per checkpoint")
 
-    cfg = yaml.safe_load(Path(args.config).read_text())
-    dataset = infer_dataset(cfg, args.dataset)
-    device = torch.device("cpu" if args.cpu or not torch.cuda.is_available() else str(cfg.get("exp", {}).get("device", "cuda:0")))
+    cfg_paths = [Path(p) for p in (args.config if len(args.config) == len(args.ckpt) else args.config * len(args.ckpt))]
+    cfgs = [yaml.safe_load(p.read_text()) for p in cfg_paths]
+    dataset = infer_dataset(cfgs[0], args.dataset)
+    device = torch.device("cpu" if args.cpu or not torch.cuda.is_available() else str(cfgs[0].get("exp", {}).get("device", "cuda:0")))
 
-    models: List[Tuple[str, Model, str]] = []
-    for ckpt_str in args.ckpt:
+    models: List[Tuple[str, Model, str, Dict[str, Any]]] = []
+    for ckpt_str, cfg in zip(args.ckpt, cfgs):
         ckpt = Path(ckpt_str).expanduser().resolve()
         m, feature_mode = build_model_from_cfg(cfg, ckpt, device)
-        models.append((ckpt.parent.name if ckpt.name == "best.pt" else ckpt.stem, m, feature_mode))
+        models.append((ckpt.parent.name if ckpt.name == "best.pt" else ckpt.stem, m, feature_mode, cfg))
 
-    feature_mode = models[0][2]
-    h5_path = Path(args.h5) if args.h5 else default_h5_path(cfg, feature_mode, args.split)
-    h5 = load_h5_arrays(h5_path)
+    h5_paths: List[Path] = []
+    if args.h5 is None:
+        h5_paths = [default_h5_path(cfg, feature_mode, args.split) for _, _, feature_mode, cfg in models]
+    elif len(args.h5) == 1:
+        h5_paths = [Path(args.h5[0])] * len(models)
+    else:
+        h5_paths = [Path(p) for p in args.h5]
+    h5s = [load_h5_arrays(p) for p in h5_paths]
+    ref_h5 = h5s[0]
+    ref_feature_mode = models[0][2]
 
-    labels_path = Path(args.scenario_labels) if args.scenario_labels else h5_path.parent / "scenario_labels.csv"
+    labels_path = Path(args.scenario_labels) if args.scenario_labels else h5_paths[0].parent / "scenario_labels.csv"
     labels = load_scenario_labels(labels_path)
     if (args.event or args.state) and labels is None:
         print(f"[WARN] scenario_labels not found: {labels_path}; falling back to meta/index selection")
 
     if args.idx is not None:
         idx = int(args.idx)
-        if idx < 0 or idx >= len(h5["meta_recordingId"]):
-            raise ValueError(f"--idx={idx} is out of range for {h5_path} ({len(h5['meta_recordingId'])} samples)")
+        if idx < 0 or idx >= len(ref_h5["meta_recordingId"]):
+            raise ValueError(f"--idx={idx} is out of range for {h5_paths[0]} ({len(ref_h5['meta_recordingId'])} samples)")
         reason = f"idx={idx}"
     else:
         idx, reason = find_sample_index(
-            h5,
+            ref_h5,
             rec_id=args.recordingId,
             track_id=args.trackId,
             t0_frame=args.t0_frame,
@@ -724,29 +747,36 @@ def main() -> None:
             scenario_rank=args.scenario_rank,
         )
 
-    rec_id = int(h5["meta_recordingId"][idx])
-    track_id = int(h5["meta_trackId"][idx])
-    t0_frame = int(h5["meta_t0_frame"][idx])
+    rec_id = int(ref_h5["meta_recordingId"][idx])
+    track_id = int(ref_h5["meta_trackId"][idx])
+    t0_frame = int(ref_h5["meta_t0_frame"][idx])
+    sample_indices = [idx] + [
+        find_exact_meta_index(h5_other, rec_id, track_id, t0_frame)
+        for h5_other in h5s[1:]
+    ]
+    print(f"selected sample: ref_idx={idx} rec={rec_id:02d} track={track_id} t0={t0_frame}")
+    print(
+        "model sample indices: "
+        + " | ".join(
+            f"{feature_mode} idx={sample_idx}"
+            for (_, _, feature_mode, _), sample_idx in zip(models, sample_indices)
+        )
+    )
 
     raw_dir = Path(args.raw_dir) if args.raw_dir else default_raw_dir(dataset)
-    normalize_heading = bool(h5.get("attrs", {}).get("normalize_heading", dataset == "exiD"))
+    normalize_heading = bool(ref_h5.get("attrs", {}).get("normalize_heading", dataset == "exiD"))
     scene = normalize_exid_scene(rec_id, raw_dir, normalize_heading) if dataset == "exiD" else normalize_highd_scene(rec_id, raw_dir)
     geom = get_sample_geometry(scene, track_id, t0_frame)
 
     preds: List[Tuple[str, np.ndarray]] = []
     metric_rows: List[Tuple[str, Dict[str, float]]] = []
-    feature_modes = {fm for _, _, fm in models}
-    if len(feature_modes) != 1:
-        raise ValueError(
-            "All checkpoints must use the same feature_mode for one h5 input. "
-            f"Got: {sorted(feature_modes)}"
-        )
-    for label, m, _ in models:
-        pred = predict_one(m, h5, idx, cfg, device)
-        plot_label = f"Pred {label}"
+    feature_modes = [fm for _, _, fm, _ in models]
+    for (label, m, feature_mode, cfg), h5, sample_idx in zip(models, h5s, sample_indices):
+        pred = predict_one(m, h5, sample_idx, cfg, device)
+        plot_label = f"Pred {feature_mode}"
         metrics = trajectory_metrics(pred, geom["future"])
         preds.append((plot_label, pred))
-        metric_rows.append((label, metrics))
+        metric_rows.append((feature_mode, metrics))
 
     if len(metric_rows) == 1:
         m = metric_rows[0][1]
@@ -756,7 +786,8 @@ def main() -> None:
             f"ADE={m['ADE']:.3f} FDE={m['FDE']:.3f} RMSE={m['RMSE']:.3f}"
             for _, m in metric_rows
         )
-    title = f"{dataset} | rec={rec_id:02d} track={track_id} t0={t0_frame} feature={feature_mode} | {metrics_text}"
+    feature_text = "/".join(feature_modes)
+    title = f"{dataset} | rec={rec_id:02d} track={track_id} t0={t0_frame} feature={feature_text} | {metrics_text}"
     print(title.replace("\n", " | "))
     out_name = f"{dataset}_rec{rec_id:02d}_track{track_id}_t0{t0_frame}_{'-vs-'.join(p[0].replace('Pred ', '') for p in preds)}.png"
     plot_scene(

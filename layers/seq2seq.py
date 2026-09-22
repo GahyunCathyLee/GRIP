@@ -42,8 +42,13 @@ class Seq2Seq(nn.Module):
     def forward(self, in_data, last_location, pred_length, teacher_forcing_ratio=0, teacher_location=None):
         batch_size = in_data.shape[0]
         out_dim = 2 
-        outputs = torch.zeros(batch_size, pred_length, out_dim)
-        if self.isCuda: outputs = outputs.cuda()
+        outputs = torch.zeros(
+            batch_size,
+            pred_length,
+            out_dim,
+            device=in_data.device,
+            dtype=in_data.dtype,
+        )
 
         encoded_output, hidden = self.encoder(in_data)
         decoder_input = last_location # (N, 1, 2)

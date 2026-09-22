@@ -37,7 +37,7 @@ class Model(nn.Module):
             self.edge_importance = [1] * len(self.st_gcn_networks)
 
         # 4. highD 전용 단일 Seq2Seq 모델 (차량용으로 통합)
-        self.seq2seq = Seq2Seq(input_size=64, hidden_size=64, num_layers=2, isCuda=True)
+        self.seq2seq = Seq2Seq(input_size=64, hidden_size=64, num_layers=2)
 
     def reshape_for_lstm(self, x):
         # x: (N, C, T, V) -> (N, V, T, C) -> (N*V, T, C)

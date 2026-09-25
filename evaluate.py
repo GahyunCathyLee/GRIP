@@ -110,6 +110,12 @@ def get_args():
     parser.add_argument('--config', type=str, default='configs/baseline.yaml', help='path to config file')
     parser.add_argument('--ckpt', type=str, required=True, help='path to model checkpoint (.pt)')
     parser.add_argument('--measure_time', action='store_true', help='measure inference time with batch size 1')
+    parser.add_argument('--latency_warmup', type=int, default=1000,
+                        help='warmup iterations for --measure_time')
+    parser.add_argument('--latency_iters', type=int, default=10000,
+                        help='measurement iterations for --measure_time')
+    parser.add_argument('--data_base_dir', type=str, default=None,
+                        help='override cfg data.base_dir; expects <feature_mode>/test.h5 under it')
     parser.add_argument('--scenario_labels', type=str, default=None,
                         help='path to scenario_labels.csv for per-scenario breakdown')
     return parser.parse_args()
@@ -207,9 +213,9 @@ def evaluate(model, loader, device, labels_lut=None):
         print_scenario_results(st_stats, label_type="State")
 
 
-def measure_inference_time(model, loader, device, iterations=10000):
+def measure_inference_time(model, loader, device, warmup=1000, iterations=10000):
     model.eval()
-    print(f"Inference Time 측정 시작 (Batch Size: 1, Iterations: {iterations})")
+    print(f"Inference Time 측정 시작 (Batch Size: 1, Warmup: {warmup}, Iterations: {iterations})")
 
     data, adj, target, _ = next(iter(loader))
     data, adj = data[0:1].to(device).float(), adj[0:1].to(device).float()
@@ -219,19 +225,30 @@ def measure_inference_time(model, loader, device, iterations=10000):
     pred_len = target.shape[1]
     times = []
 
-    for _ in range(100):
+    for _ in range(warmup):
         with torch.no_grad():
             _ = model(data, adj, pred_len)
-    torch.cuda.synchronize()
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
 
     print(f"Measuring...")
     with torch.no_grad():
-        for _ in range(iterations):
-            start_time = time.time()
-            _ = model(data, adj, pred_len)
+        if device.type == 'cuda':
+            starter = torch.cuda.Event(enable_timing=True)
+            ender = torch.cuda.Event(enable_timing=True)
             torch.cuda.synchronize()
-            end_time = time.time()
-            times.append((end_time - start_time) * 1000)
+            for _ in range(iterations):
+                starter.record()
+                _ = model(data, adj, pred_len)
+                ender.record()
+                torch.cuda.synchronize()
+                times.append(starter.elapsed_time(ender))
+        else:
+            for _ in range(iterations):
+                start_time = time.perf_counter()
+                _ = model(data, adj, pred_len)
+                end_time = time.perf_counter()
+                times.append((end_time - start_time) * 1000)
 
     avg_time = np.mean(times)
     std_time = np.std(times)
@@ -240,10 +257,10 @@ def measure_inference_time(model, loader, device, iterations=10000):
 
     print("\n" + "=" * 50)
     print(f"Inference Time Statistics (ms)")
-    print(f"  Avg Latency : {avg_time:.4f} ms")
-    print(f"  Std Dev     : {std_time:.4f} ms")
     print(f"  Min Latency : {min_time:.4f} ms")
     print(f"  Max Latency : {max_time:.4f} ms")
+    print(f"  Avg Latency : {avg_time:.4f} ms")
+    print(f"  Std Dev     : {std_time:.4f} ms")
     print("-" * 50)
     print(f"  FPS (Avg)   : {1000/avg_time:.2f} frames/s")
     print("=" * 50 + "\n")
@@ -287,9 +304,10 @@ def main():
 
     # 4. Data loader
     need_meta = labels_lut is not None
-    test_path = Path(cfg['data']['base_dir']) / feature_mode / "test.h5"
+    data_base_dir = args.data_base_dir if args.data_base_dir is not None else cfg['data']['base_dir']
+    test_path = Path(data_base_dir) / feature_mode / "test.h5"
     if not test_path.exists():
-        test_path = Path(cfg['data']['base_dir']) / feature_mode / "val.h5"
+        test_path = Path(data_base_dir) / feature_mode / "val.h5"
 
     batch_size = cfg['data'].get('batch_size_val', cfg['data'].get('batch_size', 64))
 
@@ -301,7 +319,11 @@ def main():
 
     # 5. Run
     if args.measure_time:
-        measure_inference_time(model, test_loader, device)
+        measure_inference_time(
+            model, test_loader, device,
+            warmup=args.latency_warmup,
+            iterations=args.latency_iters,
+        )
     else:
         evaluate(model, test_loader, device, labels_lut)
 
